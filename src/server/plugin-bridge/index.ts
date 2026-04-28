@@ -20,10 +20,12 @@ import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
 import { serve as honoServe } from '@hono/node-server';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join as pathJoin } from 'node:path';
 import { parseArgs } from 'util';
 
 // =============================================================================
@@ -427,10 +429,51 @@ async function loadPlugin() {
   }
   if (!capturedPlugin.sendMedia && typeof outbound?.sendMedia === 'function') {
     const outboundSendMedia = outbound.sendMedia as (params: Record<string, unknown>) => Promise<{ messageId?: string; error?: Error }>;
+    // Rust bridge.rs::send_photo / send_file POST `{ chatId, type, filename, data:base64, mimeType?, caption }`,
+    // but OpenClaw `outbound.sendMedia` expects `{ to, text, mediaUrl, mediaLocalRoots, accountId, cfg }`
+    // (mirroring sendText). Spreading params raw left every plugin field undefined → plugin
+    // logged `target=undefined`, then crashed with `Cannot read properties of undefined
+    // (reading 'trim')` deep inside its target parser.
+    //
+    // The OpenClaw outbound.sendMedia surface only accepts a `mediaUrl` (no raw buffer at this
+    // layer), so we materialize the base64 payload to a temp file and pass a bare absolute path.
+    // Why bare path instead of `file://...` URL: the WeChat plugin's `isLocalFilePath` uses
+    // `!mediaUrl.includes("://")` to detect local paths, which rejects `file://` URLs and falls
+    // through to a text-only send. Bare absolute paths satisfy both the Lark plugin
+    // (`isLocalMediaPath` → `path.isAbsolute(raw)`) and the WeChat plugin. mediaLocalRoots is
+    // scoped to just the temp dir so the plugin's path validator (post-CVE-2026-26321) doesn't
+    // refuse the read.
     capturedPlugin.sendMedia = async (params: Record<string, unknown>) => {
-      const result = await outboundSendMedia({ ...params, accountId: currentAccount.accountId || 'default', cfg: openclawCfg });
-      if (result?.error) throw result.error;
-      return { messageId: result?.messageId };
+      const chatId = params.chatId as string | undefined;
+      const filename = (params.filename as string | undefined) ?? 'file';
+      const data = params.data as string | undefined;
+      const caption = params.caption as string | null | undefined;
+      if (!chatId) {
+        throw new Error('[plugin-bridge] sendMedia: missing chatId');
+      }
+      if (!data) {
+        throw new Error('[plugin-bridge] sendMedia: missing base64 data');
+      }
+      const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
+      const tmpDir = await mkdtemp(pathJoin(tmpdir(), 'plugin-bridge-media-'));
+      const tmpPath = pathJoin(tmpDir, safeName);
+      await writeFile(tmpPath, Buffer.from(data, 'base64'));
+      try {
+        const result = await outboundSendMedia({
+          to: chatId,
+          text: caption ?? undefined,
+          mediaUrl: tmpPath,
+          mediaLocalRoots: [tmpDir],
+          accountId: currentAccount.accountId || 'default',
+          cfg: openclawCfg,
+        });
+        if (result?.error) throw result.error;
+        return { messageId: result?.messageId };
+      } finally {
+        // Cleanup is best-effort — losing a temp dir on shutdown is harmless;
+        // blocking on it would slow down the response that the AI is awaiting.
+        void rm(tmpDir, { recursive: true, force: true }).catch(() => { /* ignore */ });
+      }
     };
     console.log('[plugin-bridge] Wrapped outbound.sendMedia as sendMedia handler');
   }
