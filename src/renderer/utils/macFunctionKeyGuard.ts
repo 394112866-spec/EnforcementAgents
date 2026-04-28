@@ -6,50 +6,70 @@
 // codepoint in the U+F700-F74F band — see NSFunctionKey in AppKit.
 // WebKit *should* consume these in `keydown` to move the cursor, but at
 // the boundary the cursor cannot move; the codepoint then falls through
-// to the default `insertText` action and lands in the input value as a
-// tofu glyph (no font carries U+F700-F74F).
+// to the default `insertText:` AppKit selector and lands in the input
+// value as a tofu glyph (no font carries U+F700-F74F).
 //
-// We intercept this **at the source** with a document-level capture-phase
-// `beforeinput` listener: when the upcoming insertion is plain text and
-// the data contains any byte in F700-F74F, we cancel the event. The DOM
-// is never mutated, no `input` event fires, React is never disturbed.
+// We use **two layers** because empirically `beforeinput` is not always
+// fired for this leak path on Tauri's WKWebView (the codepoint can
+// reach the value via the AppKit selector route that bypasses
+// WebCore's edit-command pipeline). Belt-and-suspenders:
 //
-// Why `beforeinput` and not `input` capture + strip:
-//   - No `el.value` write → no React valueTracker side-effects → no risk
-//     of suppressing legitimate onChange firings on mixed-content
-//     insertions.
-//   - No caret-restore math.
-//   - No interaction with React 19's identical-value `setState` bailout
-//     (the original reason the per-call-site strip helper failed).
+//   1. **`beforeinput` capture-phase preventDefault** — when WebKit
+//      *does* route the leak through the standard edit pipeline, we
+//      cancel the insertion at source. DOM is never mutated, no
+//      `input` event fires, React is never disturbed.
 //
-// IME / paste / drag-drop are skipped via `inputType` — the leak only
-// arrives via `insertText`, so other input types don't need touching.
+//   2. **`input` capture-phase native-setter strip** — fallback for
+//      paths that bypass `beforeinput`. We rewrite the DOM value via
+//      the **native** prototype setter (NOT via `el.value = ...`,
+//      which would go through React's intercepted setter and update
+//      its valueTracker, suppressing the legitimate `onChange`). The
+//      tracker stays at its pre-leak value, so React's bubble-phase
+//      listener correctly fires `onChange` with the cleaned string
+//      when there's a real diff, and stays silent when the leak was
+//      the only mutation (state was already clean — no work to do).
+//
+// IME composition (`insertCompositionText`), paste (`insertFromPaste`),
+// drag-drop, and other inputTypes are skipped — empirically no leak,
+// and intercepting them risks breaking real input. The fallback
+// strip-on-input also runs for any input event, but the F700-F74F
+// presence check fast-paths in microseconds for clean text and is the
+// only thing that actually triggers a write.
 //
 // Tauri's WKWebView on macOS exposes the bug; WebView2 (Win) and
-// webkit2gtk (Linux) don't, so the loop in `containsLeakedFunctionKey`
-// returns false on every keystroke outside macOS — effectively a no-op.
+// webkit2gtk (Linux) don't, so the codepoint check fast-paths out on
+// every keystroke outside macOS — effectively a no-op.
 
 let installed = false;
+
+// Capture the original prototype setters once, before React has had any
+// chance to patch them. We reach for these in `flushDom` to write back
+// the cleaned value WITHOUT going through React's valueTracker — that
+// is what preserves the legitimate `onChange` for mixed-content cases.
+// (Note: React patches the *instance* value setter on each tracked
+// element, layered on top of the prototype setter. Calling the
+// prototype setter directly bypasses the patch.)
+const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+  HTMLInputElement.prototype,
+  'value',
+)?.set;
+const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(
+  HTMLTextAreaElement.prototype,
+  'value',
+)?.set;
 
 export function installMacFunctionKeyGuard(): void {
   if (installed) return;
   installed = true;
   document.addEventListener('beforeinput', onBeforeInput, { capture: true });
+  document.addEventListener('input', onInput, { capture: true });
 }
 
 function onBeforeInput(e: Event): void {
   const ie = e as InputEvent;
-  // Only block plain text insertions. IME composition fires
-  // `insertCompositionText`, paste fires `insertFromPaste`, drag-drop
-  // fires `insertFromDrop`, etc. None of those carry the leak in
-  // practice; touching them risks breaking real input.
-  //
-  // `insertReplacementText` (spell-correct accept, autocomplete commit)
-  // is included for defense-in-depth — empirically the leak we
-  // reproduced flows through `insertText`, but a future macOS build
-  // could plausibly route a boundary-arrow leak through replacement
-  // semantics, and the F700-F74F gate below is the only thing that
-  // actually pulls the trigger. Cost: one extra string compare.
+  // `insertReplacementText` is included for defense-in-depth — spell-
+  // correct accept and autocomplete commit route through it, and the
+  // F700-F74F gate is the only thing that pulls the trigger.
   if (ie.inputType !== 'insertText' && ie.inputType !== 'insertReplacementText') {
     return;
   }
@@ -60,10 +80,92 @@ function onBeforeInput(e: Event): void {
   }
 }
 
+function onInput(e: Event): void {
+  const target = e.target;
+  if (target instanceof HTMLTextAreaElement) {
+    flushIfLeaked(target, nativeTextareaValueSetter);
+    return;
+  }
+  if (target instanceof HTMLInputElement) {
+    // Only text-shaped inputs hold a string value of interest. Leak
+    // codepoints can't sneak into checkbox / file / range / color etc.
+    if (!isTextInputType(target.type)) return;
+    flushIfLeaked(target, nativeInputValueSetter);
+  }
+}
+
+function flushIfLeaked(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  setter: ((this: HTMLInputElement | HTMLTextAreaElement, v: string) => void) | undefined,
+): void {
+  const dirty = el.value;
+  if (!containsLeakedFunctionKey(dirty)) return;
+
+  const clean = stripLeakedFunctionKeys(dirty);
+
+  // Save selection BEFORE writing — writing the value collapses the
+  // selection on most engines.
+  const start = el.selectionStart;
+  const end = el.selectionEnd;
+
+  if (setter) {
+    setter.call(el, clean);
+  } else {
+    // Defensive fallback: if for any reason the prototype descriptor
+    // wasn't readable, fall back to the regular setter. React's
+    // valueTracker may then suppress the next onChange for mixed
+    // content — strictly better than leaving the leak in the DOM.
+    el.value = clean;
+  }
+
+  if (start !== null && end !== null) {
+    const ns = clampSelection(start, dirty, clean);
+    const ne = clampSelection(end, dirty, clean);
+    el.setSelectionRange(ns, ne);
+  }
+}
+
+function clampSelection(pos: number, dirty: string, clean: string): number {
+  // How many leak chars sat at-or-before `pos` in the dirty string?
+  // Subtract that count to map the caret to the clean-string position.
+  let removed = 0;
+  const limit = Math.min(pos, dirty.length);
+  for (let i = 0; i < limit; i++) {
+    const cp = dirty.charCodeAt(i);
+    if (cp >= 0xf700 && cp <= 0xf74f) removed++;
+  }
+  const next = pos - removed;
+  return Math.max(0, Math.min(next, clean.length));
+}
+
 function containsLeakedFunctionKey(s: string): boolean {
   for (let i = 0; i < s.length; i++) {
     const cp = s.charCodeAt(i);
     if (cp >= 0xf700 && cp <= 0xf74f) return true;
   }
   return false;
+}
+
+function stripLeakedFunctionKeys(s: string): string {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const cp = s.charCodeAt(i);
+    if (cp >= 0xf700 && cp <= 0xf74f) continue;
+    out += s[i];
+  }
+  return out;
+}
+
+const TEXT_INPUT_TYPES = new Set([
+  '',
+  'text',
+  'search',
+  'url',
+  'tel',
+  'email',
+  'password',
+]);
+
+function isTextInputType(t: string): boolean {
+  return TEXT_INPUT_TYPES.has(t.toLowerCase());
 }
