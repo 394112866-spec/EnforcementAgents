@@ -34,8 +34,8 @@ import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
-import { ensureSelfAwarenessWorkspace } from '@/config/configService';
-import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
+import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection } from '@/config/configService';
+import { getAgentByWorkspacePath, getAgentById } from '@/config/services/agentConfigService';
 import type { SessionMetadata } from '@/api/sessionClient';
 
 // ============================================================
@@ -234,6 +234,12 @@ export default function App() {
 
   const appProvidersRef = useRef(appProviders);
   appProvidersRef.current = appProviders;
+
+  const appApiKeysRef = useRef(appApiKeys);
+  appApiKeysRef.current = appApiKeys;
+
+  const appProviderVerifyStatusRef = useRef(appProviderVerifyStatus);
+  appProviderVerifyStatusRef.current = appProviderVerifyStatus;
 
   const configProjectsRef = useRef(configProjects);
   configProjectsRef.current = configProjects;
@@ -1678,17 +1684,27 @@ export default function App() {
           projects.find((p) => lowerTags.includes(p.name.toLowerCase())) ??
           projects[0];
 
-        // Pick the user's default provider (CC review W6). Fall back to the
-        // first available provider if the default isn't set or isn't present.
-        const defaultProviderId = configRef.current?.defaultProviderId;
-        const provider =
-          (defaultProviderId
-            ? appProvidersRef.current.find((p) => p.id === defaultProviderId)
-            : undefined) ?? appProvidersRef.current[0];
-        if (!provider) {
-          toastRef.current?.error('未配置模型供应商，无法开始 AI 讨论');
+        // PRD 0.2.3: 从前端唯一 builtin selection helper 解析出成对的 (provider, model)。
+        // 早期实现直接吃 config.defaultProviderId、跳过 workspace/agent 两层，导致
+        //   provider = openrouter（全局默认）+ model = claude-opus（agent snapshot）
+        // 这种 (provider X, model Y) 错配，触发 API key 验证失败。
+        // helper 优先级：agent → workspace → defaultProviderId → first available，
+        //   每层 isProviderAvailable 检查；返回的 model 一定 ∈ provider.models。
+        const workspaceAgent = workspace.agentId && configRef.current
+          ? getAgentById(configRef.current, workspace.agentId)
+          : undefined;
+        const sel = resolveBuiltinSelection(
+          { agent: workspaceAgent, workspace },
+          configRef.current!,
+          appProvidersRef.current,
+          appApiKeysRef.current,
+          appProviderVerifyStatusRef.current,
+        );
+        if (!sel) {
+          toastRef.current?.error('未配置可用模型供应商，无法开始 AI 讨论');
           return;
         }
+        const provider = sel.provider;
 
         // Pre-mint the alignment session id (CC review W8) so the AI doesn't
         // have to infer a placeholder. This becomes the subdir under
@@ -1751,7 +1767,7 @@ export default function App() {
 
         const initialMessage: InitialMessage = {
           text: alignmentPrompt,
-          providerId: provider.id,
+          builtinSelection: { providerId: sel.provider.id, model: sel.model },
         };
 
         // Pre-seed the tab as a Chat tab before awaiting sidecar startup.
@@ -1950,10 +1966,12 @@ export default function App() {
 
         // --- All checks passed, safe to create Tab ---
 
+        // PRD 0.2.3 + cross-review: helper agent 走 builtin runtime；通过 pairBuiltinSelection
+        // 在已知 provider 时强制 model ∈ provider.models（否则降级到 primaryModel）。
+        // event.detail.model 来自 CustomEvent，可能是另一 provider 的 model 或已删除 model。
         const initialMessage: InitialMessage = {
           text: buildSupportPrompt(description, appVersion),
-          providerId: provider.id,
-          model,
+          builtinSelection: pairBuiltinSelection(provider, model),
           images: event.detail.images,
         };
 
