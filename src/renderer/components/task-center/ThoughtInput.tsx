@@ -31,7 +31,7 @@ import {
   splitWithTagHighlights,
   tagBodyEndOffset,
 } from '@/utils/parseThoughtTags';
-import { stripMacFunctionKeys } from '@/utils/macFunctionKeyFilter';
+import { sanitizeMacFunctionKeysFromEvent } from '@/utils/macFunctionKeyFilter';
 import type { Thought } from '@/../shared/types/thought';
 
 export interface ThoughtInputHandle {
@@ -329,9 +329,11 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       // Strip macOS function-key private-use codepoints that WebKit leaks
       // into the input value when an arrow key is pressed at a boundary
-      // (cursor at 0 pressing ←, or cursor at end pressing →). See
+      // (cursor at 0 pressing ←, or cursor at end pressing →), and
+      // force-sync the DOM — a bare strip + setState is dropped by
+      // React 19's identical-value bailout. See
       // `utils/macFunctionKeyFilter.ts` for the full rationale.
-      const next = stripMacFunctionKeys(e.target.value);
+      const next = sanitizeMacFunctionKeysFromEvent(e);
       setValue(next);
       recomputeTagMenu(next, e.target.selectionStart ?? next.length);
     },
