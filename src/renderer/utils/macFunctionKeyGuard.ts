@@ -63,6 +63,10 @@ export function installMacFunctionKeyGuard(): void {
   installed = true;
   document.addEventListener('beforeinput', onBeforeInput, { capture: true });
   document.addEventListener('input', onInput, { capture: true });
+  // Diagnostic — appears once at startup, in the Tauri DevTools console.
+  // If you don't see this line in DevTools, the renderer bundle wasn't
+  // rebuilt and the running app is still on stale JS.
+  console.info('[macFunctionKeyGuard] installed (beforeinput + input capture)');
 }
 
 function onBeforeInput(e: Event): void {
@@ -77,6 +81,10 @@ function onBeforeInput(e: Event): void {
   if (!data) return;
   if (containsLeakedFunctionKey(data)) {
     e.preventDefault();
+    console.warn('[macFunctionKeyGuard] beforeinput blocked leak', {
+      inputType: ie.inputType,
+      codepoints: [...data].map(c => c.codePointAt(0)?.toString(16)),
+    });
   }
 }
 
@@ -102,6 +110,13 @@ function flushIfLeaked(
   if (!containsLeakedFunctionKey(dirty)) return;
 
   const clean = stripLeakedFunctionKeys(dirty);
+  console.warn('[macFunctionKeyGuard] input fallback stripped leak', {
+    removed: dirty.length - clean.length,
+    codepoints: [...dirty]
+      .map(c => c.codePointAt(0) ?? 0)
+      .filter(cp => cp >= 0xf700 && cp <= 0xf74f)
+      .map(cp => cp.toString(16)),
+  });
 
   // Save selection BEFORE writing — writing the value collapses the
   // selection on most engines.
