@@ -253,6 +253,7 @@ import {
   setProxyConfig,
   initSocksBridgeFromEnv,
   getHistoricalSessionMessages,
+  ensureSdkMcpInSync,
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull, isSkillBlockedOnPlatform } from './utils/platform';
@@ -8090,9 +8091,27 @@ async function main() {
                 sourceType: bridgeSourceType,
               });
             }
+
+            // After IM context-injected MCPs (im-media / im-bridge-tools) are set,
+            // sync them into the live SDK so its tool list reflects them. Without this,
+            // the pre-warmed SDK (started by heartbeat before any IM message) keeps a
+            // stale mcpServers config and the AI claims tools like im-media__send_media
+            // are "disconnected".
+            //
+            // Position note: called BEFORE setInteractionScenario so the pre-warm's
+            // current scenario (typically 'desktop' until the first IM message) is
+            // preserved in the diff. Removing scenario-bound MCPs (e.g. generative-ui)
+            // mid-session would leave the SDK's frozen systemPrompt referencing tools
+            // that no longer exist. This pass is purely additive for the IM-context
+            // tools the AI is about to need; scenario alignment is a separate concern.
+            //
+            // Builtin runtime only — external runtimes (CC/Codex) manage their own MCP set.
+            if (!shouldUseExternalRuntime()) {
+              await ensureSdkMcpInSync();
+            }
           }
 
-          // Set IM interaction scenario
+          // Set IM interaction scenario (after MCP sync, see note above)
           {
             const [imPlatform, imSourceType] = payload.source.split('_') as ['telegram' | 'feishu', 'private' | 'group'];
             setInteractionScenario({

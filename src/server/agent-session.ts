@@ -1046,6 +1046,12 @@ type McpServerEntry = SdkMcpServerConfig | McpSdkServerConfigWithInstance;
 // null = never set (use config file fallback), [] = explicitly set to none
 let currentMcpServers: McpServerDefinition[] | null = null;
 
+// Fingerprint of the MCP key set the SDK was last known to have (sorted server-id list).
+// Captured when query() starts and after each successful querySession.setMcpServers(),
+// so ensureSdkMcpInSync() can detect when the desired MCP set has drifted from the SDK's
+// live set (typically after IM context-injected MCPs become available post pre-warm).
+let frozenSdkMcpFingerprint = '';
+
 // Current sub-agent definitions (set per-query via /api/agents/set)
 // null = no agents configured, {} = explicitly set to none
 let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
@@ -2029,6 +2035,75 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
   console.log(`[agent] Built SDK MCP servers: ${Object.keys(result).join(', ') || 'none'}`);
   // Always return result (even if empty) to prevent SDK from using default config
   return result;
+}
+
+/**
+ * Sorted-key fingerprint of an MCP server map (id list).
+ * Identity comparison only — env/args/url changes for user-configured MCPs
+ * already trigger restart via mcpConfigFingerprint() + setMcpServers().
+ * This is for context-injected MCPs (im-media, im-bridge-tools, generative-ui)
+ * whose presence flips on/off as IM context becomes available.
+ */
+function mcpKeyFingerprint(servers: Record<string, unknown>): string {
+  return Object.keys(servers).sort().join(',');
+}
+
+/**
+ * Sync the SDK's live MCP set to match what `buildSdkMcpServers()` would produce now.
+ *
+ * Why this exists:
+ *   Context-injected MCPs (im-media, im-bridge-tools) become available only when
+ *   `/api/im/enqueue` arrives and calls `setImMediaContext()` / `setImBridgeToolsContext()`.
+ *   But for IM Bot Sidecars the SDK is pre-warmed by heartbeat long before the first
+ *   message — at that point those contexts are null, so `buildSdkMcpServers()` doesn't
+ *   include them, and the SDK subprocess freezes its mcpServers config without them.
+ *   When the user message later arrives via wakeGenerator(), the SDK's tool list
+ *   still excludes those MCPs and the AI reports them as "disconnected".
+ *
+ *   This function uses the SDK's runtime `setMcpServers()` to dynamically inject the
+ *   missing servers without restarting the subprocess (which would add cold-start latency
+ *   to the user's first message). On failure, it falls back to scheduling a restart.
+ *
+ * Idempotent: if the fingerprint hasn't changed since query() startup or the last
+ * successful sync, this is a no-op (cheap key-set diff).
+ *
+ * Caller contract: invoke AFTER all `setXxxContext()` calls that affect
+ * `buildSdkMcpServers()` and BEFORE the next `enqueueUserMessage()` so the SDK
+ * picks up the new tool list before processing the message.
+ */
+export async function ensureSdkMcpInSync(): Promise<void> {
+  if (!querySession) return;
+
+  const newServers = await buildSdkMcpServers();
+  const newFingerprint = mcpKeyFingerprint(newServers);
+  if (newFingerprint === frozenSdkMcpFingerprint) return;
+
+  console.log(`[agent] SDK MCP set drift detected, syncing live session: was=[${frozenSdkMcpFingerprint || '(empty)'}] now=[${newFingerprint || '(empty)'}]`);
+
+  try {
+    const result = await querySession.setMcpServers(newServers);
+    const errKeys = Object.keys(result.errors ?? {});
+    if (errKeys.length > 0) {
+      // SDK reported per-server connect errors. Don't trust the new fingerprint
+      // — the AI would think those MCPs are connected when they aren't.
+      // Fall through to the restart fallback so the next pre-warm rebuilds cleanly.
+      console.warn(`[agent] SDK setMcpServers reported errors for [${errKeys.join(',')}]: ${JSON.stringify(result.errors)} — deferring restart`);
+      frozenSdkMcpFingerprint = '';
+      scheduleDeferredRestart('mcp');
+      schedulePreWarm();
+      return;
+    }
+    frozenSdkMcpFingerprint = newFingerprint;
+    console.log(`[agent] SDK setMcpServers ok: added=[${result.added.join(',')}] removed=[${result.removed.join(',')}]`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[agent] SDK setMcpServers threw (${msg}); deferring restart so next pre-warm picks up new MCPs`);
+    // Fallback path: an SDK restart will rebuild mcpServers from scratch.
+    // Reset fingerprint so a future ensureSdkMcpInSync() retries the diff.
+    frozenSdkMcpFingerprint = '';
+    scheduleDeferredRestart('mcp');
+    schedulePreWarm();
+  }
 }
 
 /**
@@ -6175,6 +6250,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       ? { type: 'adaptive' as const }
       : { type: 'disabled' as const };
 
+    // Build MCP set ONCE so we both pass it to query() and capture its fingerprint.
+    // Capturing here (not inline in commonQueryOptions) lets ensureSdkMcpInSync() later
+    // diff the live SDK set against newly-arriving context-injected MCPs (im-media,
+    // im-bridge-tools) without rebuilding fingerprint twice.
+    const sdkMcpServersInitial = await buildSdkMcpServers();
+    frozenSdkMcpFingerprint = mcpKeyFingerprint(sdkMcpServersInitial);
+
     // Build common query options (shared between normal start and "already in use" fallback)
     const commonQueryOptions = {
       enableFileCheckpointing: true,
@@ -6228,7 +6310,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       toolConfig: {
         askUserQuestion: { previewFormat: 'html' as const },
       },
-      mcpServers: await buildSdkMcpServers(),
+      mcpServers: sdkMcpServersInitial,
       // Sub-agents: inject custom agent definitions if configured
       // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
       ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
