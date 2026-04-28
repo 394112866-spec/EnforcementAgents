@@ -2642,7 +2642,7 @@ async fn create_bot_instance<R: Runtime>(
                                 });
                             })
                         };
-                        let reply_router_arc = ensure_im_consumer(
+                        let reply_router_arc = match ensure_im_consumer(
                             &task_consumers,
                             &task_manager,
                             &session_key,
@@ -2654,7 +2654,34 @@ async fn create_bot_instance<R: Runtime>(
                             task_stream_client.clone(),
                             on_terminal,
                         )
-                        .await;
+                        .await
+                        {
+                            Some(router) => router,
+                            None => {
+                                // Sidecar identity captured by this task is no
+                                // longer live (removed during the gap, or
+                                // upgrade_session_id rotated the key). Buffer the
+                                // current message so the next round-trip — which
+                                // will run a fresh ensure_sidecar +
+                                // ensure_im_consumer with the new identity —
+                                // can replay it. Re-buffering is the correct
+                                // recovery: we have an in-hand IM message but no
+                                // working consumer registry entry to attach a
+                                // ReplySlot to; proceeding with register+enqueue
+                                // would either leak the slot (if enqueue happened
+                                // to succeed against a recreated sidecar that no
+                                // consumer is listening to) or surface a
+                                // confusing "send failed" to the user when the
+                                // sidecar is actually fine.
+                                ulog_warn!(
+                                    "[im] Re-buffering message for session_key={} requestId={} — sidecar identity drift detected at consumer-ensure",
+                                    session_key, request_id,
+                                );
+                                task_buffer.lock().await.push(&msg);
+                                task_adapter.ack_clear(&chat_id, &message_id).await;
+                                return;
+                            }
+                        };
 
                         // Pattern E: drain previously-buffered messages for this session_key
                         // before processing the current one. Now reuses the consumer
@@ -3321,6 +3348,16 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
 #[allow(clippy::too_many_arguments)] // Single call site; refactoring into a
 // struct would not improve readability and would obscure the lifetime
 // relationships between borrowed parameters.
+/// Returns `Some(router)` when a consumer is bound and ready (either
+/// reused or freshly spawned). Returns `None` when the captured sidecar
+/// identity `(session_id, generation)` is no longer live in the manager —
+/// either the sidecar was removed during the gap between caller's
+/// `ensure_sidecar` and our lock, or it was upgraded to a different
+/// session_id key. Callers MUST treat `None` as "abort this message;
+/// retry on next" rather than blindly proceeding to register/enqueue:
+/// without a consumer in the registry, SSE events from the (possibly
+/// recreated) sidecar have no listener and any registered ReplySlot
+/// would leak.
 async fn ensure_im_consumer<A>(
     consumers: &ImConsumers,
     sidecar_manager: &ManagedSidecarManager,
@@ -3332,7 +3369,7 @@ async fn ensure_im_consumer<A>(
     pending_approvals: PendingApprovals,
     stream_client: Client,
     on_terminal: Arc<dyn Fn(String, reply_router::TerminalOutcome) + Send + Sync>,
-) -> reply_router::SharedReplyRouter
+) -> Option<reply_router::SharedReplyRouter>
 where
     A: adapter::ImStreamAdapter + Send + Sync + 'static,
 {
@@ -3342,18 +3379,30 @@ where
         // identity matches: same session_id (catches `upgrade_session_id` —
         // SidecarManager rewrites its key while keeping the underlying
         // process; consumer would otherwise stay bound to the old logical id
-        // and miss future stop broadcasts), same port (defense in depth —
-        // matches the original C2 fix), same generation (the global instance
-        // ID — distinguishes a fresh sidecar from any predecessor under a
-        // reused session_id), and not already cancelled.
-        if existing.sidecar_session_id == sidecar_session_id
+        // and miss future stop broadcasts), same port, same generation (the
+        // global instance ID), not already cancelled, AND the captured
+        // identity is currently live in the manager. The last check closes
+        // the upgrade-during-gap race: if `on_terminal` upgraded the
+        // session_id between caller's capture and our lock, broadcast for
+        // (old_sid, gen) is in flight — manager already shows old_sid as
+        // not live, so we cancel + respawn against the latest captured info
+        // instead of returning the stale entry.
+        let identity_match = existing.sidecar_session_id == sidecar_session_id
             && existing.sidecar_port == sidecar_port
             && existing.sidecar_generation == sidecar_generation
-            && !existing.cancel.load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Arc::clone(&existing.reply_router);
+            && !existing.cancel.load(std::sync::atomic::Ordering::SeqCst);
+        let identity_live = identity_match
+            && sidecar_manager
+                .lock()
+                .unwrap()
+                .is_live(sidecar_session_id, sidecar_generation);
+        if identity_live {
+            return Some(Arc::clone(&existing.reply_router));
         }
-        // Any drift — cancel old before respawn.
+        // Any drift OR captured identity no longer live — cancel old before
+        // respawn. Falling through still hits the post-cancel final-check
+        // below, which will return None if no live sidecar matches the
+        // captured identity at all.
         existing.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         guard.remove(session_key);
     }
@@ -3369,14 +3418,10 @@ where
         let mgr = sidecar_manager.lock().unwrap();
         if !mgr.is_live(sidecar_session_id, sidecar_generation) {
             ulog_warn!(
-                "[im] ensure_im_consumer aborting insert for {} — sidecar instance {}@gen{} no longer live. Caller should retry on next message.",
+                "[im] ensure_im_consumer aborting insert for {} — sidecar instance {}@gen{} no longer live. Caller should abort and retry on next message.",
                 session_key, sidecar_session_id, sidecar_generation
             );
-            // Return an unregistered router. The caller's reply slot will be
-            // attached to it but no consumer is listening; the slot times out
-            // naturally and the next message reruns ensure_sidecar →
-            // ensure_im_consumer with the fresh generation.
-            return reply_router::shared_router(pending_approvals);
+            return None;
         }
     }
 
@@ -3402,7 +3447,7 @@ where
             _join: join,
         },
     );
-    reply_router
+    Some(reply_router)
 }
 
 /// Cancel + remove a consumer. Wired into shutdown / idle-collect / runtime-drift
