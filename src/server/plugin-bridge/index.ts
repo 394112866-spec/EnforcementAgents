@@ -23,7 +23,7 @@ import { serve as honoServe } from '@hono/node-server';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { registerHooks } from 'node:module';
+import { registerHooks, createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { parseArgs } from 'util';
@@ -313,24 +313,34 @@ async function loadPlugin() {
   //   2. timeout — cap at 10s so a stuck connection fails fast and the
   //      plugin's retry/fallback path kicks in (legacy fix for a separate
   //      Bun adapter hang bug).
+  //
+  // Why createRequire instead of `await import('axios')`:
+  // axios's package.json `exports.default` differs by environment:
+  //   "require": "./dist/node/axios.cjs"   ← what `require('axios')` loads
+  //   "default": "./index.js"              ← what `import('axios')` loads
+  // These are TWO DIFFERENT module instances with separate `create` functions.
+  // The lark SDK is CJS and does `var axios = require('axios')`, hitting the
+  // .cjs file. Patching the ESM-imported axios therefore never affects the
+  // SDK. Use createRequire to grab the same module the SDK will see, then
+  // patch THAT.
   try {
-    const axiosModule = await import(`${pluginDir}/node_modules/axios`);
-    const axios = axiosModule.default || axiosModule;
-    if (typeof axios?.create === 'function') {
-      const origCreate = axios.create.bind(axios);
-      axios.create = (...args: unknown[]) => {
+    const pluginRequire = createRequire(`${pluginDir}/`);
+    const axiosCjs = pluginRequire('axios') as { create?: (config?: unknown) => { defaults: Record<string, unknown> } };
+    if (typeof axiosCjs?.create === 'function') {
+      const origCreate = axiosCjs.create.bind(axiosCjs);
+      axiosCjs.create = (...args: unknown[]) => {
         const instance = origCreate(...(args as [Record<string, unknown>]));
         // Replace any custom adapter (e.g. bunFetchAdapter) with axios's built-in
         // 'http' adapter. Multipart uploads need the http adapter — fetch-based
         // shims drop FormData. The string form is supported by axios 1.x and
         // resolves to the same adapter axios would auto-pick in Node.
         instance.defaults.adapter = 'http';
-        if (!instance.defaults.timeout || instance.defaults.timeout > 10000) {
+        if (!instance.defaults.timeout || (instance.defaults.timeout as number) > 10000) {
           instance.defaults.timeout = 10000;
         }
         return instance;
       };
-      console.log('[plugin-bridge] Patched axios.create — adapter=http, timeout=10s');
+      console.log('[plugin-bridge] Patched CJS axios.create — adapter=http, timeout=10s');
     }
   } catch {
     // axios not installed in plugin dir — no patch needed
