@@ -386,8 +386,13 @@ class JsonRpcClient {
       if (handler) {
         this.pending.delete(id);
         if (msg.error) {
-          const err = msg.error as { code: number; message: string };
-          handler.reject(new Error(`RPC error ${err.code}: ${err.message}`));
+          const err = msg.error as { code: number; message: string; data?: { details?: string } };
+          // Carry err.data.details into the message: Gemini CLI puts the actionable
+          // diagnostic (e.g. `Invalid session identifier "<uuid>"`) here while leaving
+          // err.message as the generic "Internal error". Stale-session detection in
+          // startSession's catch handler matches against this string.
+          const details = typeof err.data?.details === 'string' ? `: ${err.data.details}` : '';
+          handler.reject(new Error(`RPC error ${err.code}: ${err.message}${details}`));
         } else {
           handler.resolve(msg.result);
         }
@@ -894,8 +899,12 @@ export class GeminiRuntime implements AgentRuntime {
       // Detect stale session/load failure so the caller can invalidate the
       // persisted runtimeSessionId and retry fresh. Match only phrasings
       // that unambiguously mean "the stored session is gone" — broader
-      // matches like "invalid session" could false-trigger on unrelated
+      // matches like bare "invalid session" could false-trigger on unrelated
       // auth/format errors and destroy a resumable session unnecessarily.
+      // `invalid session identifier "<uuid>"` is Gemini CLI's exact phrasing
+      // for "no chat file with that uuid in ~/.gemini/tmp/<project>/chats"
+      // (observed when the chats dir is GC'd or the project moves) and
+      // matching the qualified form keeps false positives out.
       //
       // Cross-review Codex/cc Warning: log the full error message at every
       // resume-failure point so a future Gemini CLI error-string change is a
@@ -904,7 +913,7 @@ export class GeminiRuntime implements AgentRuntime {
       // `StaleRuntimeSessionError`, they can tell the regex needs updating.
       const msg = err instanceof Error ? err.message : String(err);
       if (options.resumeSessionId) {
-        if (/session not found|no conversation found|unknown session|session does not exist/i.test(msg)) {
+        if (/session not found|no conversation found|unknown session|session does not exist|invalid session identifier/i.test(msg)) {
           console.warn(
             `[gemini] Resume session ${options.resumeSessionId} reported stale, will retry fresh. Error: ${msg}`,
           );
