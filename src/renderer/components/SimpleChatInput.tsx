@@ -608,6 +608,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       !isExternalRuntime &&
       !modelSupportsModality(provider, currentModelId, 'image');
 
+    // Capture the user-intended file count BEFORE merging fallback images
+    // into otherFiles. The downstream success toast ("已添加 N 个文件到工作区")
+    // should only count files the user actually meant to drop in — fallback
+    // images already get their own info toast and double-toasting feels noisy.
+    const userIntendedFileCount = otherFiles.length;
+
     if (fallbackImagesToFiles) {
       toastRef.current.info(
         '当前模型不支持图片输入，已转为文件存入工作区供模型读取',
@@ -683,7 +689,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           });
         }
 
-        toastRef.current.success(`已添加 ${result.files.length} 个文件到工作区`);
+        // Suppress the generic "已添加 N 个文件" success toast when the entire
+        // batch came from fallback — the info toast above already explains
+        // what happened and to the user a literal screenshot paste is not
+        // an intentional "add file to workspace" action.
+        if (userIntendedFileCount > 0) {
+          toastRef.current.success(`已添加 ${userIntendedFileCount} 个文件到工作区`);
+        }
 
         // Refresh workspace to show new files
         onWorkspaceRefresh?.();
@@ -729,6 +741,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       imagePaths.length > 0 &&
       !isExternalRuntime &&
       !modelSupportsModality(provider, currentModelId, 'image');
+
+    // See processDroppedFiles for the rationale: count only files the user
+    // actively dropped before merging fallback images, so the success toast
+    // doesn't double up with the fallback info toast.
+    const userIntendedPathCount = otherPaths.length;
 
     if (fallbackImagesToFiles) {
       toastRef.current.info(
@@ -834,11 +851,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           });
         }
 
-        // Show appropriate message
-        if (successfulCopies.length < otherPaths.length) {
-          toastRef.current.warning(`已添加 ${successfulCopies.length}/${otherPaths.length} 个文件到工作区`);
-        } else {
-          toastRef.current.success(`已添加 ${successfulCopies.length} 个文件到工作区`);
+        // Show appropriate message — but only count user-intended paths.
+        // Fallback images already got their own info toast above; layering
+        // a generic "已添加 N 个文件" on top would be redundant.
+        if (userIntendedPathCount > 0) {
+          if (successfulCopies.length < otherPaths.length) {
+            toastRef.current.warning(`已添加 ${successfulCopies.length}/${otherPaths.length} 个文件到工作区`);
+          } else {
+            toastRef.current.success(`已添加 ${userIntendedPathCount} 个文件到工作区`);
+          }
         }
 
         // Refresh workspace to show new files
