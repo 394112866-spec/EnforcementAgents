@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::{Child, Stdio};
 #[cfg(windows)]
 use std::process::Command;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::sync::Once;
@@ -618,9 +618,25 @@ pub struct SidecarManager {
     session_activations: HashMap<String, SessionActivation>,
     /// Port counter for allocation (starts from BASE_PORT)
     port_counter: AtomicU16,
-    /// Session ID -> generation counter. Incremented each time a sidecar is created
-    /// for a session. Used to detect replacements during lock-gap HTTP health checks.
+    /// Session ID -> generation counter. The generation is the unique instance
+    /// ID of the *current* sidecar bound to that session_id, drawn from the
+    /// process-global `instance_counter` below. Used both for lock-gap HTTP
+    /// health-check race detection AND for IM event-consumer cancellation
+    /// matching (consumer entries store the generation they were spawned
+    /// against; broadcast stop events carry the generation; matching is
+    /// reuse-safe because the global counter never produces the same value
+    /// twice).
     sidecar_generations: HashMap<String, u64>,
+    /// Process-global monotonic counter for sidecar instance IDs. Every
+    /// `insert_sidecar` draws a fresh value via `fetch_add`. Crucially, this
+    /// is **never** reset — even when `sidecar_generations.clear()` runs in
+    /// `stop_all` or `clear_generation` removes one entry, the counter
+    /// keeps climbing. Without this, a session_id reused after idle release
+    /// (IM idle collector preserves session_id by design) would get
+    /// generation=1 again and a stale stop event for the previous instance
+    /// would falsely match. With this, IDs are unique for the lifetime of
+    /// the process and reuse is impossible.
+    instance_counter: AtomicU64,
     /// Broadcast sender — emits `(session_id, generation)` whenever a
     /// SessionSidecar is removed (last owner released, runtime drift kill,
     /// explicit stop, app shutdown). The generation is critical: a remove +
@@ -650,6 +666,9 @@ impl SidecarManager {
             session_activations: HashMap::new(),
             port_counter: AtomicU16::new(BASE_PORT),
             sidecar_generations: HashMap::new(),
+            // Start at 1 so a freshly-defaulted u64 (0) cannot accidentally
+            // match a real generation — useful as a sentinel.
+            instance_counter: AtomicU64::new(1),
             stop_events,
         }
     }
@@ -678,24 +697,36 @@ impl SidecarManager {
             .collect()
     }
 
-    /// Public read of the generation counter for a session (0 if never created).
-    /// Used by IM `ensure_im_consumer` for a final-check inside its registry
-    /// lock: if the sidecar has been removed (or rotated) between
-    /// `ensure_sidecar` and the consumer-insert step, the captured generation
-    /// will not match the live one and the insert is aborted to avoid
-    /// reanimating a consumer against a dead port.
-    pub fn generation_for(&self, session_id: &str) -> u64 {
-        self.current_generation(session_id)
+    /// Public read of the generation (= unique instance ID) for a session,
+    /// or `None` if no sidecar is currently bound to that session_id.
+    /// Returning `Option` (not 0) makes "never existed" explicit at call sites.
+    pub fn generation_for(&self, session_id: &str) -> Option<u64> {
+        self.sidecar_generations.get(session_id).copied()
     }
 
-    /// Increment and return the generation counter for a session.
+    /// True if a sidecar with this `(session_id, generation)` is currently
+    /// in `sidecars` AND its recorded generation matches. Stronger predicate
+    /// than `generation_for` alone: catches the case where the manager has a
+    /// stale generation entry but the sidecar HashMap entry is gone.
+    /// Used by IM `ensure_im_consumer` final-check.
+    pub fn is_live(&self, session_id: &str, generation: u64) -> bool {
+        self.sidecars.contains_key(session_id)
+            && self.sidecar_generations.get(session_id).copied() == Some(generation)
+    }
+
+    /// Allocate the next instance ID and stash it as this session's current
+    /// generation. The ID comes from the process-global atomic counter, so
+    /// it is unique for the whole process lifetime — repeated sidecars under
+    /// the same session_id (e.g. IM idle release + rebuild) get distinct
+    /// generations, which is what makes IM event-consumer reuse race-free.
     fn next_generation(&mut self, session_id: &str) -> u64 {
-        let gen = self.sidecar_generations.entry(session_id.to_string()).or_insert(0);
-        *gen += 1;
-        *gen
+        let id = self.instance_counter.fetch_add(1, Ordering::SeqCst);
+        self.sidecar_generations.insert(session_id.to_string(), id);
+        id
     }
 
-    /// Get the current generation counter for a session (0 if never created).
+    /// Get the current generation counter for a session (0 if never created
+    /// or has been cleared). 0 is never a real generation (counter starts at 1).
     fn current_generation(&self, session_id: &str) -> u64 {
         self.sidecar_generations.get(session_id).copied().unwrap_or(0)
     }
