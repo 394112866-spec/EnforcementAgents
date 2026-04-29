@@ -24,7 +24,7 @@ import {
   getRuntimePermissionModes,
   type RuntimeType,
 } from '@/../shared/types/runtime';
-import { PERMISSION_MODES } from '@/config/types';
+import { PERMISSION_MODES, PRESET_MCP_SERVERS } from '@/config/types';
 import type { McpServerDefinition } from '@/config/types';
 
 // "跟随" sentinel: an empty-string value selected from <CustomSelect>
@@ -32,6 +32,22 @@ import type { McpServerDefinition } from '@/config/types';
 // than a different sentinel keeps the option compatible with the existing
 // `<CustomSelect value={…}>` contract (which doesn't tolerate `undefined`).
 const FOLLOW_VALUE = '';
+
+/**
+ * Best-effort renderer-side platform detection for filtering MCP presets
+ * that declare a `platforms` whitelist. Mirrors the helper inside
+ * `mcpService.ts` (intentionally not exported there). When `navigator` is
+ * unavailable (SSR, headless test env), default to darwin — the picker
+ * surface is desktop-only so the choice is safe.
+ */
+function detectRendererPlatform(): NodeJS.Platform {
+  if (typeof navigator !== 'undefined') {
+    if (/Win/i.test(navigator.platform)) return 'win32';
+    if (/Mac/i.test(navigator.platform)) return 'darwin';
+    if (/Linux/i.test(navigator.platform)) return 'linux';
+  }
+  return 'darwin';
+}
 
 interface Props {
   /** Workspace path the task is bound to — used to resolve the workspace's
@@ -128,40 +144,50 @@ export function TaskAdvancedConfigEditor(props: Props) {
     return projects.find((p) => p.path === workspacePath) ?? null;
   }, [workspacePath, projects]);
 
-  // Resolve the workspace's provider so we can populate the model picker
-  // with the same model list the chat sidebar uses.
+  // Resolve the workspace's provider — mirrors WorkspaceBasicsSection's
+  // precedence exactly so the "current model" hint here matches the model
+  // shown in Agent settings (PRD 0.2.4 cross-review user feedback):
+  //   agent.providerId → project.providerId → null
   //
-  // Fallback chain (mirrors Launcher.tsx and App.tsx for legacy projects):
-  //   agent.providerId → project.providerId → config.defaultProviderId → null
-  //
-  // Legacy projects (created before per-project provider was introduced)
-  // have providerId === null; those rely on the global default and we
-  // surface its model list so the picker still works for them.
+  // We deliberately DO NOT fall back to `config.defaultProviderId` for
+  // display — that would surface a model the user never picked for this
+  // workspace. For legacy projects with no provider at all, the picker
+  // shows the "未配置 provider" empty state instead of a misleading
+  // global default.
   const workspaceProvider = useMemo(() => {
     const providerId =
       workspaceAgent?.providerId
       ?? workspaceProject?.providerId
-      ?? config?.defaultProviderId
       ?? null;
     if (!providerId) return null;
     return providers.find((p) => p.id === providerId) ?? null;
-  }, [workspaceAgent, workspaceProject, providers, config]);
+  }, [workspaceAgent, workspaceProject, providers]);
 
-  // Display label for "跟随 Agent" — what model does the workspace
-  // currently use? Precedence: agent.model > project.model > provider.primaryModel.
-  const workspaceDefaultModel =
-    workspaceAgent?.model
-    || workspaceProject?.model
-    || workspaceProvider?.primaryModel
-    || '';
+  // "Current model" display — same precedence + display rule as
+  // WorkspaceBasicsSection so the hint here reads identically to Agent
+  // settings (e.g. "Kimi K2.6", not the raw model id "moonshotai/Kimi-K2.6"):
+  //   1. effectiveModel = agent.model ?? project.model
+  //   2. modelName: if effectiveModel is in provider.models → modelName;
+  //                 else effectiveModel itself; else provider.primaryModel.
+  const workspaceEffectiveModelId =
+    workspaceAgent?.model || workspaceProject?.model || '';
+  const workspaceDefaultModelLabel = (() => {
+    if (workspaceEffectiveModelId) {
+      const hit = workspaceProvider?.models?.find(
+        (m) => m.model === workspaceEffectiveModelId,
+      );
+      return hit?.modelName || workspaceEffectiveModelId;
+    }
+    return workspaceProvider?.primaryModel || '';
+  })();
 
   const modelOptions = useMemo(() => {
     if (!workspaceProvider) return [{ value: FOLLOW_VALUE, label: '跟随 Agent 工作区' }];
     const opts = [
       {
         value: FOLLOW_VALUE,
-        label: workspaceDefaultModel
-          ? `跟随 Agent（当前 ${workspaceDefaultModel}）`
+        label: workspaceDefaultModelLabel
+          ? `跟随 Agent（当前 ${workspaceDefaultModelLabel}）`
           : '跟随 Agent 工作区',
       },
       ...workspaceProvider.models.map((m) => ({
@@ -176,28 +202,51 @@ export function TaskAdvancedConfigEditor(props: Props) {
       opts.push({ value: model, label: `其他：${model}` });
     }
     return opts;
-  }, [workspaceProvider, workspaceDefaultModel, model]);
+  }, [workspaceProvider, workspaceDefaultModelLabel, model]);
 
-  // MCP catalogue — user's installed servers plus presets that are bundled.
-  // Presets that are filtered by platform on the renderer side already get
-  // pruned by `config.mcpServers`; we don't need to reproduce that gate.
-  // Use `config` as the memo dep to satisfy React Compiler's preserve-memo
-  // check; `config` is structurally stable across renders unless the user
-  // actually mutates settings, which is exactly when we want to recompute.
+  // MCP catalogue — preset MCPs bundled with the app (Playwright /
+  // DuckDuckGo / EdgeTTS / etc.) **plus** the user's custom servers.
+  // Mirrors `mcpService.getAllMcpServers` semantics: a custom server with
+  // the same id as a preset overrides the preset. Without merging presets,
+  // a fresh install (no custom servers) would show "尚未安装任何 MCP" even
+  // though Playwright et al. are clearly available — the original bug a
+  // user reported on 2026-04-29.
   const mcpCatalogue: McpServerDefinition[] = useMemo(() => {
-    const list = Array.isArray(config?.mcpServers) ? config.mcpServers : [];
-    return [...list].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    const customServers = Array.isArray(config?.mcpServers) ? config.mcpServers : [];
+    const customIds = new Set(customServers.map((s) => s.id));
+    // Filter presets by current platform so we don't surface MCPs that
+    // can't actually run here (e.g. Cuse on Windows). The renderer-side
+    // platform check is intentionally minimal — the canonical filter
+    // lives in admin-config.ts; this is just to keep the picker honest.
+    const platform = detectRendererPlatform();
+    const presets = PRESET_MCP_SERVERS.filter(
+      (p) => !p.platforms || p.platforms.includes(platform),
+    );
+    const merged = [
+      ...presets.filter((p) => !customIds.has(p.id)),
+      ...customServers,
+    ];
+    return [...merged].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
   }, [config]);
 
   const runtimeOptions = useMemo(
     () => [
-      { value: FOLLOW_VALUE, label: '跟随 Agent 工作区' },
+      {
+        value: FOLLOW_VALUE,
+        // Inline the Agent's actual current runtime in the option label
+        // (consistent with the model picker's "跟随 Agent（当前 X）" shape)
+        // so the user can see what "follow" resolves to without scanning a
+        // separate hint line.
+        label: agentRuntimeLabel
+          ? `跟随 Agent 工作区（当前 ${agentRuntimeLabel}）`
+          : '跟随 Agent 工作区',
+      },
       ...VALID_RUNTIMES.map((r) => ({
         value: r,
         label: RUNTIME_DISPLAY_NAMES[r],
       })),
     ],
-    [],
+    [agentRuntimeLabel],
   );
 
   // Permission-mode options pivot on the EFFECTIVE runtime (Agent's runtime
@@ -273,16 +322,15 @@ export function TaskAdvancedConfigEditor(props: Props) {
 
       {open && (
         <div className="space-y-5 border-t border-[var(--line-subtle)] px-4 py-4">
-          {/* Runtime — always visible. The hint copy surfaces the Agent's
-              actual current runtime name (e.g. "Gemini CLI") so the user
-              can see at a glance what "跟随 Agent" resolves to without
-              cross-referencing the Agent settings panel. */}
+          {/* Runtime — always visible. The "（当前 X）" suffix lives in the
+              "跟随 Agent" option label itself (see runtimeOptions), so the
+              hint here just describes the field semantically. */}
           <FieldRow
             label="Runtime"
             hint={
               workspaceLabel
-                ? `不选择时跟随 ${workspaceLabel}（当前 ${agentRuntimeLabel}）`
-                : `不选择时跟随 Agent 工作区（当前 ${agentRuntimeLabel}）`
+                ? `不选择时跟随 ${workspaceLabel}`
+                : '不选择时跟随 Agent 工作区'
             }
           >
             <CustomSelect
