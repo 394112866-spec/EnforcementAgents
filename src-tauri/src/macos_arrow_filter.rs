@@ -12,7 +12,7 @@
 //! a JS-side guard cannot catch it.
 //!
 //! wry shipped a fix for this in PR #769 (2022): an override of
-//! `keyDown:` on the `WryWebView` class that simply does NOT forward
+//! `keyDown:` on wry's `WryWebView` subclass that simply does NOT forward
 //! arrow keycodes (123-126) to super. WKWebView's own keyboard pipeline
 //! still produces JS `KeyboardEvent` and moves the cursor — only the
 //! leaky AppKit default is bypassed.
@@ -44,14 +44,10 @@ pub fn install_arrow_key_filter() {
 }
 
 unsafe fn install_inner() {
-    // wry registers its WKWebView subclass under the literal name
-    // "WryWebView" via `define_class!`. If wry ever renames it, our
-    // lookup will return None and we'll log a warning rather than
-    // panic.
-    let cls = match AnyClass::get(c"WryWebView") {
+    let cls = match find_wry_webview_class() {
         Some(c) => c,
         None => {
-            log::warn!("[macos_arrow_filter] WryWebView class not found; arrow-key filter not installed (leak workaround inactive)");
+            log::warn!("[macos_arrow_filter] wry WKWebView subclass not found; arrow-key filter not installed (leak workaround inactive)");
             return;
         }
     };
@@ -78,6 +74,51 @@ unsafe fn install_inner() {
         // implementations do not block adding our override.
         log::info!("[macos_arrow_filter] WryWebView already has a direct keyDown: method; assuming upstream fix landed, skipping");
     }
+}
+
+fn find_wry_webview_class() -> Option<&'static AnyClass> {
+    // wry <= 0.54.2 used an explicit ObjC class name.
+    if let Some(cls) = AnyClass::get(c"WryWebView") {
+        return Some(cls);
+    }
+
+    // wry 0.54.4 removed `#[name = "WryWebView"]`. objc2 then generates a
+    // version-suffixed class name such as
+    // `wry::wkwebview::class::wry_web_view::WryWebView0.54.4`.
+    let mut found = None;
+    let mut matches = Vec::new();
+    for cls in AnyClass::classes().iter().copied() {
+        let name = cls.name().to_string_lossy();
+        if is_wry_webview_class_name(&name) {
+            matches.push(name.into_owned());
+            found = Some(cls);
+        }
+    }
+
+    if matches.len() > 1 {
+        log::warn!(
+            "[macos_arrow_filter] multiple WryWebView-like classes found: {}; using last registered match",
+            matches.join(", ")
+        );
+    } else if let Some(name) = matches.first() {
+        log::info!("[macos_arrow_filter] found generated WryWebView class: {name}");
+    }
+
+    found
+}
+
+fn is_wry_webview_class_name(name: &str) -> bool {
+    let tail = name.rsplit("::").next().unwrap_or(name);
+    if tail == "WryWebView" {
+        return true;
+    }
+    let Some(version) = tail.strip_prefix("WryWebView") else {
+        return false;
+    };
+    version
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit())
 }
 
 extern "C" fn key_down_filter(
