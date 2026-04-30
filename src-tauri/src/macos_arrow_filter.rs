@@ -58,13 +58,6 @@ unsafe fn install_inner() {
 
     let sel: Sel = sel!(keyDown:);
 
-    // Defensive: if wry ever lands the upstream fix, the class will
-    // already define keyDown: directly. Don't double-register.
-    if cls.instance_method(sel).is_some() {
-        log::info!("[macos_arrow_filter] WryWebView already overrides keyDown:; assuming upstream fix landed, skipping");
-        return;
-    }
-
     // Method type encoding: void (id self, SEL _cmd, id event)
     let types = c"v@:@";
     let imp_fn: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) = key_down_filter;
@@ -80,7 +73,10 @@ unsafe fn install_inner() {
     if added.as_bool() {
         log::info!("[macos_arrow_filter] WryWebView keyDown: filter installed (re-applies wry PR #769)");
     } else {
-        log::warn!("[macos_arrow_filter] class_addMethod returned false; keyDown: not installed");
+        // `class_addMethod` only fails when the class itself already has a
+        // method for this selector. Inherited `WKWebView` / `NSResponder`
+        // implementations do not block adding our override.
+        log::info!("[macos_arrow_filter] WryWebView already has a direct keyDown: method; assuming upstream fix landed, skipping");
     }
 }
 
