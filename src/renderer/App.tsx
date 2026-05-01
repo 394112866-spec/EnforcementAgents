@@ -2024,16 +2024,16 @@ export default function App() {
           return;
         }
 
-        // Two paths, no third:
+        // Two paths to a paired (provider, model):
         //   A. Explicit picker (BugReportOverlay): caller supplied (providerId, model)
-        //      from the model picker. Honor it via pairBuiltinSelection (model ∈
-        //      provider.models invariant). The picker also persists the same pair
-        //      back into helper Agent via useHelperAgentModelDefaults, so future
-        //      launches pick it up via path B.
-        //   B. Implicit (Chat error banner / Settings mcp dialog): no hint passed.
-        //      Don't fabricate a builtinSelection here — let Chat tab autoSend
-        //      fall through to currentAgent = helper Agent's persisted
-        //      providerId/model. This matches "open ~/.myagents from Launcher".
+        //      and the provider is still available — honor via pairBuiltinSelection.
+        //   B. Implicit (Chat error banner / Settings mcp dialog) OR explicit-but-
+        //      provider-unavailable: resolve via priority chain
+        //      (helperAgent → helperProject → defaultProviderId → first available),
+        //      each layer guarded by isProviderAvailable.
+        // Always pass an explicit builtinSelection (when any provider is available)
+        // so Chat tab autoSend doesn't race against the invalid-model correction
+        // useEffect when helper Agent's persisted (provider, model) has gone stale.
         let builtinSelection: { providerId: string; model: string } | undefined;
         if (providerId) {
           const provider = appProvidersRef.current.find(p => p.id === providerId);
@@ -2044,8 +2044,23 @@ export default function App() {
           )) {
             builtinSelection = pairBuiltinSelection(provider, model);
           }
-          // else: requested provider is gone / unavailable → drop hint, fall
-          // through to helper Agent default (path B).
+        }
+        if (!builtinSelection) {
+          const helperAgent = project.agentId && configRef.current
+            ? getAgentById(configRef.current, project.agentId)
+            : undefined;
+          const sel = resolveBuiltinSelection(
+            { agent: helperAgent, workspace: project },
+            configRef.current!,
+            appProvidersRef.current,
+            appApiKeysRef.current,
+            appProviderVerifyStatusRef.current,
+          );
+          if (sel) {
+            builtinSelection = { providerId: sel.provider.id, model: sel.model };
+          }
+          // else: no provider available system-wide — let Chat tab show its
+          // empty-state guidance ("请先设置模型服务").
         }
 
         const initialMessage: InitialMessage = {
