@@ -339,6 +339,7 @@ export default function TabProvider({
 
     // Sync currentSessionId when prop changes (e.g., from parent re-initializing)
     useEffect(() => {
+        currentSessionIdRef.current = sessionId;
         setCurrentSessionId(sessionId);
     }, [sessionId]);
 
@@ -374,6 +375,11 @@ export default function TabProvider({
 
     // Refs for SSE handling
     const sseRef = useRef<SseConnection | null>(null);
+    // The sessionId used by the currently connected SSE stream. App.tsx can
+    // switch a tab to a new Session Sidecar without remounting this provider,
+    // so "SSE connected" alone is not enough; it must be connected to THIS session.
+    const connectedSseSessionIdRef = useRef<string | null>(null);
+    const sseReconnectGenerationRef = useRef(0);
     const isStreamingRef = useRef(false);
     // Tracks whether the backend session is actively processing (system-init received → idle).
     // Separate from isStreamingRef which means "a streaming message exists in React state".
@@ -988,7 +994,7 @@ export default function TabProvider({
                 if (isNewSessionRef.current || isLoadingSessionRef.current) {
                     break;
                 }
-                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } } } | null;
+                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: Message['metadata'] } } | null;
                 if (!payload?.message) break;
                 const msg = payload.message;
                 if (seenIdsRef.current.has(msg.id)) break;
@@ -2116,13 +2122,13 @@ export default function TabProvider({
     // Called when SSE retries exhaust OR when Rust health monitor restarts the sidecar.
     const recoverSessionSidecar = useCallback(async () => {
         if (recoveryInFlightRef.current) return; // Deduplicate concurrent calls
-        if (sseRef.current?.isConnected()) return; // Already recovered
+        const sid = currentSessionIdRef.current;
+        if (!sid) return;
+        if (sseRef.current?.isConnected() && connectedSseSessionIdRef.current === sid) return; // Already recovered
         if (recoveryAttemptsRef.current >= MAX_RECOVERY_ATTEMPTS) {
             console.error(`[TabProvider ${tabId}] Max recovery attempts (${MAX_RECOVERY_ATTEMPTS}) reached, giving up`);
             return;
         }
-        const sid = currentSessionIdRef.current;
-        if (!sid) return;
         recoveryInFlightRef.current = true;
         recoveryAttemptsRef.current++;
         try {
@@ -2143,6 +2149,7 @@ export default function TabProvider({
                 await sseRef.current.disconnect();
                 sseRef.current = null;
             }
+            connectedSseSessionIdRef.current = null;
             if (!isMountedRef.current) return;
             await connectSseRef.current();
             if (!isMountedRef.current) return;
@@ -2166,12 +2173,30 @@ export default function TabProvider({
     // the `tauriClient` layer so every consumer — SSE, HTTP, DirectoryPanel,
     // model push — is automatically correct. See `tauriClient.getTabServerUrl`.
     const connectSse = useCallback(async () => {
-        if (sseRef.current?.isConnected()) return;
+        const connectingSessionId = currentSessionIdRef.current;
+        if (sseRef.current?.isConnected()) {
+            if (connectedSseSessionIdRef.current === connectingSessionId) return;
+            console.log(`[TabProvider ${tabId}] SSE is connected to ${connectedSseSessionIdRef.current ?? 'none'}, reconnecting for ${connectingSessionId ?? 'none'}`);
+            connectedSseSessionIdRef.current = null;
+            setIsConnected(false);
+            resetTabServerUrlCache(tabId);
+            await sseRef.current.disconnect();
+            sseRef.current = null;
+        } else {
+            connectedSseSessionIdRef.current = null;
+            setIsConnected(false);
+            if (sseRef.current) {
+                await sseRef.current.disconnect();
+                sseRef.current = null;
+            }
+        }
 
         const sse = createSseConnection(tabId, currentSessionIdRef);
         sse.setEventHandler(handleSseEvent);
         sse.setStatusHandler((status) => {
+            if (sseRef.current !== sse) return;
             if (status === 'disconnected' || status === 'failed') {
+                connectedSseSessionIdRef.current = null;
                 setIsConnected(false);
                 setIsLoading(false);
             }
@@ -2187,10 +2212,16 @@ export default function TabProvider({
 
         try {
             await sse.connect();
+            connectedSseSessionIdRef.current = connectingSessionId ?? currentSessionIdRef.current ?? null;
             setIsConnected(true);
             // Note: Log server URL is set once in App.tsx using global sidecar
             // Tab sidecars should not override it to avoid URL switching issues
         } catch (error) {
+            if (sseRef.current === sse) {
+                sseRef.current = null;
+                connectedSseSessionIdRef.current = null;
+                setIsConnected(false);
+            }
             console.error(`[TabProvider ${tabId}] SSE connect failed:`, error);
             throw error;
         }
@@ -2202,9 +2233,64 @@ export default function TabProvider({
         if (sseRef.current) {
             void sseRef.current.disconnect();
             sseRef.current = null;
+            connectedSseSessionIdRef.current = null;
             setIsConnected(false);
         }
     }, []);
+
+    // App.tsx switches Session Sidecars without remounting TabProvider. Keep the
+    // event stream attached to the current session, otherwise /chat/send can
+    // persist successfully while the visible tab waits on an old/dead SSE stream.
+    useEffect(() => {
+        if (!agentDir || !sessionId) return;
+
+        const connectedSessionId = connectedSseSessionIdRef.current;
+        const isConnectedToAnySession = sseRef.current?.isConnected() ?? false;
+
+        if (isConnectedToAnySession && connectedSessionId === sessionId) return;
+
+        // Pending -> real id upgrade during an active turn keeps the same sidecar.
+        // Reconnecting here can briefly drop streaming events; just re-label the
+        // live stream so the load guard below knows it belongs to the real session.
+        if (
+            isConnectedToAnySession &&
+            connectedSessionId &&
+            isPendingSessionId(connectedSessionId) &&
+            !isPendingSessionId(sessionId) &&
+            (isSessionActiveRef.current || isStreamingRef.current)
+        ) {
+            connectedSseSessionIdRef.current = sessionId;
+            return;
+        }
+
+        const generation = ++sseReconnectGenerationRef.current;
+        let cancelled = false;
+
+        void (async () => {
+            if (isConnectedToAnySession) {
+                console.log(`[TabProvider ${tabId}] SessionId changed from ${connectedSessionId ?? 'none'} to ${sessionId}, reconnecting SSE`);
+                connectedSseSessionIdRef.current = null;
+                setIsConnected(false);
+                resetTabServerUrlCache(tabId);
+                const oldSse = sseRef.current;
+                sseRef.current = null;
+                if (oldSse) {
+                    await oldSse.disconnect();
+                }
+            }
+
+            if (cancelled || !isMountedRef.current || sseReconnectGenerationRef.current !== generation) return;
+            await connectSseRef.current();
+        })().catch((error) => {
+            if (!cancelled) {
+                console.error(`[TabProvider ${tabId}] SSE reconnect for session ${sessionId} failed:`, error);
+            }
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [agentDir, sessionId, tabId]);
 
     // Cleanup on unmount - disconnect SSE and clear pending timers
     // NOTE: Sidecar lifecycle is now managed by App.tsx performCloseTab(),
@@ -2216,6 +2302,7 @@ export default function TabProvider({
                 void sseRef.current.disconnect();
                 sseRef.current = null;  // Allow garbage collection
             }
+            connectedSseSessionIdRef.current = null;
             if (stopTimeoutRef.current) {
                 clearTimeout(stopTimeoutRef.current);
                 stopTimeoutRef.current = null;
@@ -2499,7 +2586,7 @@ export default function TabProvider({
             // startReached handler pulls older history lazily via `?before=<id>`
             // as the user scrolls up. Keeps first-paint JSON body tiny on 600+
             // message sessions.
-            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
+            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: Message['metadata'] }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -2717,7 +2804,7 @@ export default function TabProvider({
                         timestamp: string;
                         sdkUuid?: string;
                         attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
-                        metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string };
+                        metadata?: Message['metadata'];
                     }>;
                     hasMoreBefore?: boolean;
                 };
@@ -2833,7 +2920,7 @@ export default function TabProvider({
                                 timestamp: string;
                                 sdkUuid?: string;
                                 attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
-                                metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string };
+                                metadata?: Message['metadata'];
                             }>;
                         }>(`/sessions/${encodeURIComponent(internalSessionId)}/since/${encodeURIComponent(last.id)}`);
 
@@ -2913,6 +3000,9 @@ export default function TabProvider({
     // Unified session loading effect - handles both initial load and session changes
     useEffect(() => {
         const prevSessionId = prevSessionIdRef.current;
+        const isPendingSession = isPendingSessionId(sessionId);
+        const wasPendingSession = isPendingSessionId(prevSessionId);
+        const sessionChanged = prevSessionId !== sessionId;
         prevSessionIdRef.current = sessionId;
 
         // No sessionId - reset flag and return
@@ -2921,13 +3011,17 @@ export default function TabProvider({
             return;
         }
 
+        // A real session switch must be allowed to load after SSE reattaches.
+        // Preserve the pending->real loaded flag because that path represents
+        // the same live sidecar/session becoming durable, not a user switch.
+        if (sessionChanged && !(wasPendingSession && !isPendingSession)) {
+            initialSessionLoadedRef.current = false;
+        }
+
         // Not connected yet - wait
         if (!isConnected) {
             return;
         }
-
-        const isPendingSession = isPendingSessionId(sessionId);
-        const wasPendingSession = isPendingSessionId(prevSessionId);
 
         // Case 1: Current sessionId is pending - skip (doesn't exist in backend yet)
         if (isPendingSession) {
@@ -2954,11 +3048,21 @@ export default function TabProvider({
                 return;
             }
 
+            if (connectedSseSessionIdRef.current !== sessionId) {
+                console.log(`[TabProvider ${tabId}] Waiting for SSE to attach to session ${sessionId} before loadSession`);
+                return;
+            }
+
             // Case 2c: Switching from an unused pending session to a real session - need to load data
             // This happens when user selects a history session while current tab has unused pending session
             console.log(`[TabProvider ${tabId}] Switching from unused pending to ${sessionId}, loading session`);
             initialSessionLoadedRef.current = true;
             void loadSession(sessionId);
+            return;
+        }
+
+        if (connectedSseSessionIdRef.current !== sessionId) {
+            console.log(`[TabProvider ${tabId}] Waiting for SSE to attach to session ${sessionId} before loadSession`);
             return;
         }
 
