@@ -112,13 +112,24 @@ fn save_pending_update_to_disk(version: &str, bytes: &[u8]) -> Result<(), String
     Ok(())
 }
 
-/// Remove pending update files from disk
+/// Remove pending update files from disk AND reset the related in-memory
+/// trackers (DOWNLOADED_VERSION + LATEST_UPDATE cache).
+///
+/// All three are bound by the same invariant — they describe "the bytes
+/// currently waiting to be installed". Resetting only one when the others
+/// are still set lets stale latest-wins decisions or stale cache hits
+/// re-introduce the cache==disk inconsistency this whole module is trying
+/// to prevent. Bundle the reset so callers can't forget.
 #[cfg(target_os = "windows")]
 fn clear_pending_update_from_disk() {
     if let Ok(dir) = get_myagents_dir() {
         let _ = std::fs::remove_file(dir.join("pending_update.bin"));
         let _ = std::fs::remove_file(dir.join("pending_update.bin.tmp"));
         let _ = std::fs::remove_file(dir.join("pending_update.json"));
+    }
+    *DOWNLOADED_VERSION.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Ok(mut guard) = LATEST_UPDATE.lock() {
+        *guard = None;
     }
 }
 
@@ -212,8 +223,10 @@ fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Upd
 /// Check for updates on startup and silently download if available
 /// This is the main entry point called from setup hook
 pub async fn check_update_on_startup(app: AppHandle) {
-    // Wait 5 seconds before checking to let the app fully initialize
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // Wait 60 seconds before checking — startup is heavy enough without an
+    // updater HTTPS round-trip racing the user's first action. Periodic
+    // checks (every 30 min) catch up after this initial window.
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
     logger::info(&app, "[Updater] Starting background update check...");
 
@@ -295,12 +308,18 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
         }
     };
 
-    // Cache the Update object immediately — this is what lets the install path
-    // (Windows click-to-install) skip the network round-trip on click. Even if
-    // we early-exit below (stale defensive guard, latest-wins skip, disk cache
-    // hit), the cache is populated for the eventual install call.
-    cache_update(update.clone());
-
+    // Invariant: LATEST_UPDATE cache must only hold an Update whose `version`
+    // matches what's currently on disk in pending_update.bin/json. Otherwise a
+    // user click during the silent-download window (cache=NEW, disk=OLD) hits
+    // `cached_update_for(disk_version)` → miss → falls back to a fresh
+    // updater.check() → server returns NEW → version mismatch → install path
+    // CLEARS the OLD disk bytes, killing the user's pending install before
+    // the NEW download has even finished writing. Pre-replace clicks must
+    // install whatever's on disk.
+    //
+    // So: do NOT cache here. Cache only at the points where we've confirmed
+    // disk and Update.version are aligned (each early-return branch + after
+    // save_pending_update_to_disk succeeds).
     let version = update.version.clone();
 
     // Defensive guard: reject downgrades even if server/CDN returns a stale version.
@@ -326,6 +345,9 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
                     app,
                     format!("[Updater] v{} already downloaded, skipping re-download", version),
                 );
+                // DOWNLOADED_VERSION is set only after save_pending_update_to_disk
+                // succeeds (line 440), so disk == version here. Cache aligned.
+                cache_update(update.clone());
                 return Ok(None);
             }
             if !is_version_greater(&version, dv) {
@@ -333,6 +355,10 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
                     app,
                     format!("[Updater] v{} not newer than already downloaded v{}, skipping", version, dv),
                 );
+                // Disk holds `dv`, server returned `version` (older/equal). The
+                // Update object we have describes `version`, NOT `dv` — caching
+                // it here would violate the cache==disk invariant. Leave any
+                // pre-existing cache for `dv` alone.
                 return Ok(None);
             }
             logger::info(
@@ -407,14 +433,28 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
                     app,
                     format!("[Updater] Windows: v{} already cached on disk, skipping re-download", version),
                 );
+                // Disk == version; safe to align cache.
+                cache_update(update.clone());
                 return Ok(Some(version));
             }
         }
 
-        let bytes = update
-            .download(on_chunk, || {})
-            .await
-            .map_err(|e| format!("Silent download failed: {}", e))?;
+        // Tell the renderer we're entering the actual download phase. The
+        // titlebar / Settings "重启更新" button hides while this is in flight
+        // because the version that the button claims is "ready" may be about
+        // to be replaced. Clicking install mid-download lands on inconsistent
+        // cache/disk state — better to hide. The button reappears on
+        // `updater:ready-to-restart` (new bytes committed) or
+        // `updater:download-failed` (kept old bytes, no replacement).
+        let _ = app.emit("updater:download-started", UpdateReadyInfo { version: version.clone() });
+
+        let bytes = match update.download(on_chunk, || {}).await {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
+                return Err(format!("Silent download failed: {}", e));
+            }
+        };
 
         logger::info(
             app,
@@ -424,16 +464,31 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
         // Save to disk — install_pending_update will read from here
         if let Err(e) = save_pending_update_to_disk(&version, &bytes) {
             logger::error(app, format!("[Updater] Failed to save update to disk: {}", e));
+            let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
             return Err(format!("Failed to persist update: {}", e));
         }
+
+        // CRITICAL: align cache only AFTER disk write commits. The atomic
+        // tmp+rename inside save_pending_update_to_disk means
+        // read_pending_update_version() now sees `version`, so cached
+        // `Update` for the same `version` is safe. Doing this BEFORE
+        // save_pending_update_to_disk (or before the download) is the bug
+        // we're avoiding: it widens the cache=NEW/disk=OLD window so a
+        // pre-replace install click would re-fetch and DELETE the OLD bytes.
+        cache_update(update.clone());
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        update
-            .download_and_install(on_chunk, || {})
-            .await
-            .map_err(|e| format!("Silent download failed: {}", e))?;
+        // Same UI mutex applies on macOS — relaunch path uses bytes installed
+        // by `download_and_install`, but during this window the .app on disk
+        // is being swapped, so a click that triggers `relaunch()` could race.
+        let _ = app.emit("updater:download-started", UpdateReadyInfo { version: version.clone() });
+
+        if let Err(e) = update.download_and_install(on_chunk, || {}).await {
+            let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
+            return Err(format!("Silent download failed: {}", e));
+        }
     }
 
     // Track this version as the latest downloaded (latest-wins protocol)

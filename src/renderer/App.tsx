@@ -110,6 +110,8 @@ interface TabContentProps {
   updateChecking: boolean;
   updateDownloading: boolean;
   updateInstalling: boolean;
+  /** Silent download is replacing pending bytes — UI button must hide. */
+  updatePreparing: boolean;
   onCheckForUpdate: () => Promise<'up-to-date' | 'downloading' | 'error'>;
   onRestartAndUpdate: () => void;
   // Task Center intent carried by the most recent OPEN_TASK_CENTER event.
@@ -123,7 +125,7 @@ const MemoizedTabContent = memo(function TabContent({
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   onClearJoinedExistingSidecar,
   settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
-  updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling,
+  updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing,
   onCheckForUpdate, onRestartAndUpdate,
   taskCenterPendingIntent,
 }: TabContentProps) {
@@ -151,6 +153,7 @@ const MemoizedTabContent = memo(function TabContent({
           updateChecking={updateChecking}
           updateDownloading={updateDownloading}
           updateInstalling={updateInstalling}
+          updatePreparing={updatePreparing}
           onCheckForUpdate={onCheckForUpdate}
           onRestartAndUpdate={onRestartAndUpdate}
         />
@@ -199,6 +202,7 @@ const MemoizedTabContent = memo(function TabContent({
     prev.updateChecking === next.updateChecking &&
     prev.updateDownloading === next.updateDownloading &&
     prev.updateInstalling === next.updateInstalling &&
+    prev.updatePreparing === next.updatePreparing &&
     // Reference equality — each OPEN_TASK_CENTER dispatch allocates a
     // fresh intent object (or `null`), so identity comparison is enough.
     // Without this line, a user re-clicking the Launcher's search icon
@@ -212,7 +216,7 @@ const MemoizedTabContent = memo(function TabContent({
 
 export default function App() {
   // Auto-update state (silent background updates)
-  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, installing: updateInstalling, checkForUpdate, pendingUpdateOnStartup, dismissPendingUpdate } = useUpdater();
+  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, installing: updateInstalling, preparing: updatePreparing, checkForUpdate, pendingUpdateOnStartup, dismissPendingUpdate } = useUpdater();
 
   // Stable callback for Settings prop — ref pattern ensures memo comparator correctness
   const restartAndUpdateRef = useRef(restartAndUpdate);
@@ -2179,6 +2183,7 @@ export default function App() {
         updateReady={updateReady}
         updateVersion={updateVersion}
         updateInstalling={updateInstalling}
+        updatePreparing={updatePreparing}
         onRestartAndUpdate={() => void handleRestartAndUpdate()}
       >
         <TabBar
@@ -2221,6 +2226,7 @@ export default function App() {
             updateChecking={updateChecking}
             updateDownloading={updateDownloading}
             updateInstalling={updateInstalling}
+            updatePreparing={updatePreparing}
             onCheckForUpdate={checkForUpdate}
             onRestartAndUpdate={handleRestartAndUpdate}
             taskCenterPendingIntent={taskCenterPendingIntent}
@@ -2247,8 +2253,13 @@ export default function App() {
         />
       )}
 
-      {/* Windows: startup dialog for pending update from previous session */}
-      {pendingUpdateOnStartup && (
+      {/* Windows: startup dialog for pending update from previous session.
+          Hidden while a silent download is replacing the pending bytes —
+          confirming "安装" mid-replacement could land on inconsistent
+          cache/disk state. Comes back into view automatically when the
+          download completes (the dialog reads pendingUpdateOnStartup, which
+          is unchanged; only the visibility gate is `updatePreparing`). */}
+      {pendingUpdateOnStartup && !updatePreparing && (
         <ConfirmDialog
           title="发现新版本"
           message={`最新版本 v${pendingUpdateOnStartup} 已下载完成，是否立即安装？`}

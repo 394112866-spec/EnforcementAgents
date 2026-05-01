@@ -26,6 +26,11 @@ interface CustomTitleBarProps {
     /** Whether an install is currently in flight (post-click). When true the
      *  button shows a spinner and is disabled to prevent double-clicks. */
     updateInstalling?: boolean;
+    /** Whether a silent download is replacing the pending bytes. When true
+     *  the button hides entirely — clicking install mid-replacement would
+     *  land on inconsistent cache/disk state. The button reappears with the
+     *  new version once the replacement commits. */
+    updatePreparing?: boolean;
     /** Callback when user clicks "Restart to Update" */
     onRestartAndUpdate?: () => void;
 }
@@ -43,6 +48,7 @@ export default function CustomTitleBar({
     updateReady,
     updateVersion,
     updateInstalling,
+    updatePreparing,
     onRestartAndUpdate,
 }: CustomTitleBarProps) {
     const [isFullscreen, setIsFullscreen] = useState(false);
@@ -178,12 +184,15 @@ export default function CustomTitleBar({
                 className="flex flex-shrink-0 items-center gap-1 px-3 h-full"
                 data-no-drag
             >
-                {/* Update button - only shown when update is ready.
-                    Spinner + disabled state during install so the user sees
-                    immediate feedback on click. Without this, a Windows
-                    install that needs a network round-trip looked like the
-                    button did nothing. */}
-                {updateReady && (
+                {/* Update button - only shown when update is ready AND no
+                    silent replacement download is in flight. Spinner +
+                    disabled state during install so the user sees immediate
+                    feedback on click. Hidden during silent download because
+                    the pending bytes are about to be replaced — clicking
+                    install mid-replacement could land on inconsistent
+                    cache/disk state. Reappears automatically when the
+                    replacement commits (with the new version). */}
+                {updateReady && !updatePreparing && (
                     <button
                         onClick={updateInstalling ? undefined : onRestartAndUpdate}
                         disabled={updateInstalling}

@@ -156,6 +156,9 @@ interface SettingsProps {
     updateDownloading?: boolean;
     /** Whether an install is currently in flight (post-click, from useUpdater) */
     updateInstalling?: boolean;
+    /** Whether a silent download is replacing pending bytes (from useUpdater).
+     *  When true the install button hides — see CustomTitleBar prop comment. */
+    updatePreparing?: boolean;
     /** Trigger manual update check. Returns result for toast feedback. */
     onCheckForUpdate?: () => Promise<'up-to-date' | 'downloading' | 'error'>;
     /** Restart and install update (from useUpdater) */
@@ -175,7 +178,7 @@ async function getPlaywrightDefaultArgs(): Promise<string[]> {
 /** Playwright device presets shared between parser and UI */
 const PLAYWRIGHT_DEVICE_PRESETS = ['iPhone 15 Pro', 'iPhone 15', 'iPhone SE', 'iPad Pro 11', 'Pixel 7', 'Galaxy S23'];
 
-export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
+export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -3021,7 +3024,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             )}
                                         </div>
                                     )}
-                                    {propUpdateReady && propUpdateVersion && (
+                                    {/* Hidden during silent replacement (updatePreparing) for the
+                                        same reason CustomTitleBar hides its button: pending bytes
+                                        are mid-replacement, click would hit inconsistent state. */}
+                                    {propUpdateReady && propUpdateVersion && !updatePreparing && (
                                         <div className="mt-3 flex items-center gap-2">
                                             <span className="text-sm text-[var(--success)]">发现新版本 v{propUpdateVersion}</span>
                                             <button

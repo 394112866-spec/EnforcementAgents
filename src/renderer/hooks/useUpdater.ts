@@ -44,6 +44,11 @@ interface UseUpdaterResult {
     downloading: boolean;
     /** Whether an install is currently in flight (button click → install start) */
     installing: boolean;
+    /** Whether a silent download is currently writing the next pending package
+     *  to disk. Mutually exclusive with the install button: while preparing,
+     *  the button hides because the version it claims to be "ready" may be
+     *  about to be replaced (or, on first-time download, isn't on disk yet). */
+    preparing: boolean;
     /** Manually trigger an update check. Returns result for caller to show toast feedback. */
     checkForUpdate: () => Promise<CheckUpdateResult>;
     /** Version of a pending update discovered on startup (Windows only, from disk) */
@@ -64,6 +69,7 @@ export function useUpdater(): UseUpdaterResult {
     const [checking, setChecking] = useState(false);
     const [downloading, setDownloading] = useState(false);
     const [installing, setInstalling] = useState(false);
+    const [preparing, setPreparing] = useState(false);
     // Windows: version from disk-persisted pending update (shown as startup dialog)
     const [pendingUpdateOnStartup, setPendingUpdateOnStartup] = useState<string | null>(null);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -254,26 +260,47 @@ export function useUpdater(): UseUpdaterResult {
             console.log('[useUpdater] Setting up event listener for updater:ready-to-restart...');
         }
         let isMounted = true;
-        let unlisten: UnlistenFn | null = null;
+        // Multiple events feed the same state machine; collect their
+        // unlisteners so the cleanup tears them down together.
+        const unlisteners: UnlistenFn[] = [];
 
         const setup = async () => {
             try {
-                unlisten = await listen<UpdateReadyInfo>('updater:ready-to-restart', (event) => {
+                unlisteners.push(await listen<UpdateReadyInfo>('updater:ready-to-restart', (event) => {
                     if (isDebugMode()) {
                         console.log('[useUpdater] Event received: updater:ready-to-restart', event.payload);
                     }
-                    if (!isMounted) {
-                        return;
-                    }
+                    if (!isMounted) return;
                     setUpdateVersion(event.payload.version);
                     setUpdateReady(true);
                     setDownloading(false);
-                });
+                    setPreparing(false);
+                }));
+                // `download-started` hides the install button: the bytes that
+                // would back a click are mid-replacement, so the click target
+                // is briefly inconsistent. Mirror via `download-failed` to
+                // un-hide if the download couldn't commit.
+                unlisteners.push(await listen<UpdateReadyInfo>('updater:download-started', (event) => {
+                    if (isDebugMode()) {
+                        console.log('[useUpdater] Event received: updater:download-started', event.payload);
+                    }
+                    if (!isMounted) return;
+                    setPreparing(true);
+                }));
+                unlisteners.push(await listen<UpdateReadyInfo>('updater:download-failed', (event) => {
+                    if (isDebugMode()) {
+                        console.log('[useUpdater] Event received: updater:download-failed', event.payload);
+                    }
+                    if (!isMounted) return;
+                    setPreparing(false);
+                }));
                 if (isDebugMode()) {
-                    console.log('[useUpdater] Event listener registered successfully');
+                    console.log('[useUpdater] Event listeners registered successfully');
                 }
             } catch (err) {
                 console.error('[useUpdater] Failed to setup event listener:', err);
+                // Partial registration: still tear down whatever succeeded.
+                for (const fn of unlisteners) fn();
             }
         };
 
@@ -281,7 +308,7 @@ export function useUpdater(): UseUpdaterResult {
 
         return () => {
             isMounted = false;
-            if (unlisten) unlisten();
+            for (const fn of unlisteners) fn();
         };
     }, []);
 
@@ -348,6 +375,7 @@ export function useUpdater(): UseUpdaterResult {
         checking,
         downloading,
         installing,
+        preparing,
         checkForUpdate,
         pendingUpdateOnStartup,
         dismissPendingUpdate,
