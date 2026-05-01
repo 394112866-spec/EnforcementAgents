@@ -67,41 +67,55 @@ pub async fn cmd_workspace_read_preview(
     Ok(PreviewResult { content, name, size })
 }
 
-/// Mirrors the previewable extension set used by `src/shared/fileTypes.ts::isPreviewable`.
-/// Kept as a small, hand-curated list — the sidecar version is also a static set.
+/// Mirrors `src/shared/fileTypes.ts::isPreviewable`: **binary-blocklist** strategy.
+/// Anything NOT a known binary extension is considered previewable; extensionless
+/// names (Makefile, LICENSE, .gitignore, Caddyfile, etc.) are always previewable.
+///
+/// Cross-review caught the original allowlist as a real UX regression — sidecar
+/// `isPreviewableText` falls through to this same blocklist via `isPreviewable`,
+/// so the renderer's "show preview" gate and the Rust port's "allow read" gate
+/// must agree. Set must stay in sync with `src/shared/fileTypes.ts` BINARY_EXTENSIONS.
 fn is_previewable(name: &str) -> bool {
-    let ext = std::path::Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase());
-    let Some(ext) = ext else {
-        // Files without extension — preview only well-known names.
-        return matches!(
-            name,
-            "README" | "LICENSE" | "CHANGELOG" | "Makefile" | "Dockerfile" | "Procfile" | ".gitignore"
-        );
+    let lower = name.to_ascii_lowercase();
+    let ext = match lower.rsplit_once('.') {
+        Some((_, e)) if !e.is_empty() => e,
+        // No dot at all → extensionless file (Makefile, LICENSE, …) — previewable.
+        // A leading-dot dotfile (`.zshrc`, `.gitignore`) gets `_` empty / the rest
+        // as ext via rsplit_once, but our heuristic above mirrors fileTypes.ts:93
+        // (`if (!ext || ext === filename.toLowerCase()) return true`) — when the
+        // extension equals the whole filename (no real ext), treat as previewable.
+        _ => return true,
     };
-    matches!(
-        ext.as_str(),
-        // Text / docs
-        "md" | "mdx" | "txt" | "log" | "rst" | "tex"
-            // Code
-            | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
-            | "rs" | "go" | "py" | "rb" | "java" | "kt" | "swift"
-            | "c" | "h" | "cpp" | "hpp" | "cc" | "cs"
-            | "sh" | "zsh" | "bash" | "fish" | "ps1" | "bat" | "cmd"
-            | "lua" | "pl" | "php" | "scala" | "groovy" | "dart"
-            | "vue" | "svelte" | "astro"
-            // Markup / data
-            | "json" | "json5" | "yaml" | "yml" | "toml" | "ini" | "env"
-            | "html" | "htm" | "xml" | "svg" | "css" | "scss" | "sass" | "less"
-            | "csv" | "tsv"
-            | "graphql" | "gql"
-            | "sql"
-            // Config
-            | "conf" | "cfg" | "rc" | "lock"
-    )
+    if ext == lower {
+        return true;
+    }
+    !BINARY_EXTENSIONS.contains(&ext)
 }
+
+/// Keep in sync with `src/shared/fileTypes.ts::BINARY_EXTENSIONS`.
+const BINARY_EXTENSIONS: &[&str] = &[
+    // Images (superset of IMAGE_EXTENSIONS — includes raw/vector formats)
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif",
+    "psd", "ai", "eps", "raw", "cr2", "nef", "heic", "heif", "avif", "jxl",
+    // Video
+    "mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp",
+    // Audio
+    "mp3", "wav", "aac", "ogg", "flac", "wma", "m4a", "opus", "aiff",
+    // Archives / Compressed
+    "zip", "tar", "gz", "bz2", "xz", "rar", "7z", "zst", "lz4", "lzma", "cab", "dmg", "iso",
+    // Executables / Libraries
+    "exe", "dll", "so", "dylib", "bin", "app", "msi", "deb", "rpm", "apk", "ipa",
+    // Compiled / Object
+    "o", "obj", "class", "pyc", "pyo", "wasm", "elc",
+    // Fonts
+    "ttf", "otf", "woff", "woff2", "eot",
+    // Documents (binary formats)
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
+    // Databases
+    "db", "sqlite", "sqlite3", "mdb",
+    // Other binary
+    "dat", "ds_store", "swp", "swo",
+];
 
 #[cfg(test)]
 mod tests {
@@ -172,6 +186,68 @@ mod tests {
         )
         .await;
         assert!(res.is_err());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Cross-review regression guards: the renderer side `isPreviewable` is a
+    // BINARY blocklist (not text allowlist). The Rust gate must agree, otherwise
+    // the user clicks a file the UI says is previewable and Rust returns "not
+    // supported".
+    #[tokio::test]
+    async fn allows_extensionless_files() {
+        let ws = make_test_workspace("preview_extless");
+        for name in ["Makefile", "LICENSE", "Dockerfile", "Caddyfile"] {
+            fs::write(ws.join(name), "content").unwrap();
+            let res = cmd_workspace_read_preview(
+                ws.to_string_lossy().to_string(),
+                name.to_string(),
+            )
+            .await;
+            assert!(res.is_ok(), "{} should be previewable", name);
+        }
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn allows_dotfiles() {
+        let ws = make_test_workspace("preview_dotfiles");
+        for name in [".zshrc", ".gitconfig", ".npmrc", ".tool-versions"] {
+            fs::write(ws.join(name), "content").unwrap();
+            let res = cmd_workspace_read_preview(
+                ws.to_string_lossy().to_string(),
+                name.to_string(),
+            )
+            .await;
+            assert!(res.is_ok(), "{} should be previewable", name);
+        }
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn allows_unknown_text_extension() {
+        let ws = make_test_workspace("preview_unknown_ext");
+        fs::write(ws.join("data.weirdext"), "still text").unwrap();
+        let res = cmd_workspace_read_preview(
+            ws.to_string_lossy().to_string(),
+            "data.weirdext".to_string(),
+        )
+        .await;
+        assert!(res.is_ok(), "unknown extension should default to previewable");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn rejects_known_binary_extensions() {
+        let ws = make_test_workspace("preview_binary_ext");
+        for name in ["app.exe", "vid.mp4", "music.mp3", "lib.so", "doc.docx"] {
+            fs::write(ws.join(name), "fake").unwrap();
+            let res = cmd_workspace_read_preview(
+                ws.to_string_lossy().to_string(),
+                name.to_string(),
+            )
+            .await;
+            assert!(res.is_err(), "{} should be rejected as binary", name);
+        }
         let _ = fs::remove_dir_all(&ws);
     }
 }

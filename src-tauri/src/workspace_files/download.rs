@@ -8,6 +8,7 @@
 //! all and the caller should prompt the user to "Open with default app".
 
 use std::fs;
+use std::io::Read;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
@@ -47,7 +48,23 @@ pub async fn cmd_workspace_download_file(
         ));
     }
 
-    let bytes = fs::read(&resolved).map_err(|e| format!("Read failed: {}", e))?;
+    // Bounded read — TOCTOU between metadata.len() above and the read here:
+    // file may grow under us. Cap the read at MAX+1 bytes; if we hit MAX+1
+    // we know the size check raced and we reject. Avoids the
+    // unbounded-Vec<u8> growth path the cross-review flagged.
+    let mut file = fs::File::open(&resolved).map_err(|e| format!("Open failed: {}", e))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let read_cap = MAX_DOWNLOAD_BYTES + 1;
+    file.by_ref()
+        .take(read_cap)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Read failed: {}", e))?;
+    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "File too large to preview (max {} MB)",
+            MAX_DOWNLOAD_BYTES / 1024 / 1024
+        ));
+    }
     let name = std::path::Path::new(&path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -65,10 +82,11 @@ pub async fn cmd_workspace_download_file(
     })
 }
 
-/// Tiny MIME sniffer covering image / common preview cases. Sidecar uses the
-/// `mime-types` npm package but for download-to-preview we only ever return
-/// images (DirectoryPanel preview modal). Fall back to octet-stream so the
-/// renderer never gets `undefined`.
+/// Tiny MIME sniffer covering image / common preview cases. Sidecar's
+/// `sniffMime` is similarly hand-rolled (`src/server/utils/file-response.ts`);
+/// for download-to-preview we only ever return images (DirectoryPanel preview
+/// modal), so the table is intentionally short. Fall back to octet-stream so
+/// the renderer never gets `undefined`.
 fn sniff_mime(ext: &str) -> String {
     match ext {
         "png" => "image/png",
@@ -111,22 +129,21 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_oversize() {
-        let ws = make_test_workspace("download_big");
-        // Small enough to write quickly but over the limit if we bumped it.
-        // Use 1 byte more than MAX_DOWNLOAD_BYTES via sparse file isn't portable;
-        // instead override the test by creating a regular file just under and
-        // verifying the cap path. Here we rely on the read path's own size check
-        // happening after metadata.len() — synthetic test of the check itself.
-        let p = ws.join("blob.bin");
-        // Write a small file then assert success path, to verify code branches at all.
-        fs::write(&p, vec![0u8; 16]).unwrap();
+        // Cross-review fix: the previous version of this test wrote 16 bytes
+        // and only verified happy-path mime detection — the cap branch was
+        // never exercised. Now we write MAX_DOWNLOAD_BYTES + 1 and assert
+        // the size-check error propagates.
+        let ws = make_test_workspace("download_oversize");
+        let p = ws.join("huge.bin");
+        let buf = vec![0u8; (MAX_DOWNLOAD_BYTES + 1) as usize];
+        fs::write(&p, &buf).unwrap();
         let res = cmd_workspace_download_file(
             ws.to_string_lossy().to_string(),
-            "blob.bin".to_string(),
+            "huge.bin".to_string(),
         )
-        .await
-        .unwrap();
-        assert_eq!(res.mime_type, "application/octet-stream");
+        .await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("too large"));
         let _ = fs::remove_dir_all(&ws);
     }
 

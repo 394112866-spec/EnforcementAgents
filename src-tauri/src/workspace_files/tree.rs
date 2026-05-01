@@ -250,7 +250,12 @@ fn walk_dir(
         }
     }
 
-    // dirs first, then files; both alphabetical by name (matches sidecar sort).
+    // dirs first, then files; both alphabetical by name. KNOWN DRIFT vs sidecar:
+    // sidecar uses JS `localeCompare` (Unicode-aware locale collation); we use
+    // ASCII-lowercased byte compare. For pure-ASCII workspaces the order is
+    // identical; for CJK / accented names the order differs (e.g. `é` vs `e`,
+    // `日本語` ordering). Pulling `icu_collator` for this would add ~2MB to the
+    // binary just for two `sort_by` calls; we accept the drift in exchange.
     dirs.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase()));
     files.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
 

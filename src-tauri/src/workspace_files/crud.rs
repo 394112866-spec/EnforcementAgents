@@ -12,6 +12,15 @@ use super::path_safety::{
     resolve_inside_workspace, validate_item_name, validate_workspace_root,
 };
 
+/// Symlink-aware existence probe. `Path::exists()` follows symlinks, which
+/// returns `false` for a broken symlink — see CLAUDE.md v0.2.5 red-line. For
+/// "is this slot occupied" checks before a write op we need the inode-level
+/// answer: is there ANY directory entry at this path. `symlink_metadata`
+/// gives us that without traversing the link.
+fn slot_occupied(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatePathResult {
@@ -54,7 +63,7 @@ pub async fn cmd_workspace_new_file(
         return Err("Parent directory does not exist".to_string());
     }
     let target = parent.join(name.trim());
-    if target.exists() {
+    if slot_occupied(&target) {
         return Err("File already exists".to_string());
     }
     fs::write(&target, "").map_err(|e| format!("Failed to create file: {}", e))?;
@@ -82,7 +91,7 @@ pub async fn cmd_workspace_new_folder(
         return Err("Parent directory does not exist".to_string());
     }
     let target = parent.join(name.trim());
-    if target.exists() {
+    if slot_occupied(&target) {
         return Err("Folder already exists".to_string());
     }
     fs::create_dir_all(&target).map_err(|e| format!("Failed to create folder: {}", e))?;
@@ -106,14 +115,14 @@ pub async fn cmd_workspace_rename(
     validate_item_name(new_name.trim())?;
     let workspace_root = validate_workspace_root(&workspace)?;
     let old_resolved = resolve_inside_workspace(&workspace_root, old_path.trim())?;
-    if !old_resolved.exists() {
+    if !slot_occupied(&old_resolved) {
         return Err("File or folder not found".to_string());
     }
     let parent = old_resolved
         .parent()
         .ok_or_else(|| "No parent directory".to_string())?;
     let new_resolved = parent.join(new_name.trim());
-    if new_resolved.exists() {
+    if slot_occupied(&new_resolved) {
         return Err("Target name already exists".to_string());
     }
     fs::rename(&old_resolved, &new_resolved)
@@ -156,14 +165,17 @@ pub async fn cmd_workspace_move(
                 continue;
             }
         };
-        if !resolved_src.exists() {
+        if !slot_occupied(&resolved_src) {
             errors.push(format!("Not found: {}", trimmed));
             continue;
         }
-        // Block moving a dir into itself / its descendant.
-        if resolved_src == target
-            || target.starts_with(format!("{}{}", resolved_src.display(), std::path::MAIN_SEPARATOR))
-        {
+        // Block moving a dir into itself / its descendant. Use Path::starts_with
+        // (component-aware) instead of string comparison via `.display()` —
+        // `.display()` is lossy on non-UTF-8 filenames and silently substitutes
+        // U+FFFD, which would let a corrupt-name dir slip past this check.
+        // Path::starts_with covers both equality and descendant cases at the
+        // component level.
+        if target.starts_with(&resolved_src) {
             errors.push(format!("Cannot move folder into itself: {}", trimmed));
             continue;
         }
@@ -180,7 +192,7 @@ pub async fn cmd_workspace_move(
         }
 
         let mut destination = target.join(&item_name);
-        if destination.exists() {
+        if slot_occupied(&destination) {
             // Auto-rename `name (1).ext`, `name (2).ext`, ...
             let stem;
             let ext;
@@ -194,13 +206,26 @@ pub async fn cmd_workspace_move(
                     ext = "";
                 }
             }
+            // Cap at 9999 collisions; if all slots are taken, refuse rather
+            // than silently overwriting (cross-review caught: previous loop
+            // would fall through with `destination` still pointing at the
+            // colliding path, and `fs::rename` overwrites on Unix).
+            let mut found = false;
             for counter in 1..=9999u32 {
                 let candidate = format!("{} ({}){}", stem, counter, ext);
                 let candidate_path = target.join(&candidate);
-                if !candidate_path.exists() {
+                if !slot_occupied(&candidate_path) {
                     destination = candidate_path;
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                errors.push(format!(
+                    "Too many name collisions in target for {}",
+                    trimmed
+                ));
+                continue;
             }
         }
 
@@ -377,6 +402,66 @@ mod tests {
         // Move was attempted but rejected per-item; errors carry the reason.
         assert!(res.moved_files.is_empty());
         assert_eq!(res.errors.len(), 1);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Cross-review regression guard: pre-fix code used `Path::exists()` which
+    // follows symlinks → broken-symlink at a slot returns false → caller
+    // proceeds with `fs::write` / `fs::create_dir_all` and gets a confusing
+    // error. CLAUDE.md v0.2.5 red-line. The slot_occupied helper uses
+    // `symlink_metadata` so a broken symlink correctly registers as "occupied".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_file_rejects_broken_symlink_slot() {
+        use std::os::unix::fs::symlink;
+        let ws = make_test_workspace("crud_broken_slot_file");
+        symlink("/nonexistent/target", ws.join("foo.txt")).unwrap();
+        let res = cmd_workspace_new_file(
+            ws.to_string_lossy().to_string(),
+            "".to_string(),
+            "foo.txt".to_string(),
+        )
+        .await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("already exists"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_folder_rejects_broken_symlink_slot() {
+        use std::os::unix::fs::symlink;
+        let ws = make_test_workspace("crud_broken_slot_folder");
+        symlink("/nonexistent/target", ws.join("bar")).unwrap();
+        let res = cmd_workspace_new_folder(
+            ws.to_string_lossy().to_string(),
+            "".to_string(),
+            "bar".to_string(),
+        )
+        .await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("already exists"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Cross-review caught: `.display()` is lossy on non-UTF-8 filenames; the
+    // pre-fix into-self check used string formatting via `.display()` which
+    // would fail open on corrupt names. `Path::starts_with` is component-aware.
+    #[tokio::test]
+    async fn move_into_self_uses_component_check() {
+        let ws = make_test_workspace("crud_move_self_components");
+        // Edge: directory whose parent IS the source — three-level nest.
+        fs::create_dir_all(ws.join("outer/inner/deep")).unwrap();
+        let res = cmd_workspace_move(
+            ws.to_string_lossy().to_string(),
+            vec!["outer".to_string()],
+            "outer/inner/deep".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(res.moved_files.is_empty());
+        assert_eq!(res.errors.len(), 1);
+        assert!(res.errors[0].contains("itself"));
         let _ = fs::remove_dir_all(&ws);
     }
 }

@@ -746,16 +746,24 @@ const DirectoryPanel = memo(
     // Pre-PRD-0.2.7: a hidden <input type="file" multiple> fed File objects
     // here, which we wrapped in FormData and POSTed to /agent/import (cap
     // 500MB, streamed to disk by the sidecar). Tauri's IPC isn't built for
-    // 500MB base64 payloads, so D4 takes a different (and faster) path:
-    // for the file-picker entry point we open a Tauri native dialog to get
-    // ABSOLUTE PATHS, then `cmd_workspace_copy_paths` cp's them directly in
-    // Rust — no base64 round-trip, no payload limit. The drag-drop entry
-    // point already works on browser File objects (no path) so it stays on
-    // the base64 branch via importBase64Files.
+    // 500MB base64 payloads — encoding inflates ~33% AND we need to fit the
+    // whole payload in renderer memory + IPC channel before Rust touches the
+    // disk. Cross-review caught: the migration removed the 500MB cap without
+    // adding a renderer-side equivalent, so picking a 4GB video would lock
+    // up the renderer building the base64 string. We enforce a per-batch
+    // size cap on the renderer side as a guardrail. Files needing larger
+    // upload are expected to come through the path-based drag-drop flow
+    // (handleTauriFileDrop → copyPaths) which has no IPC payload concern.
     const handleImport = async (files: FileList | null) => {
-      // Browser/file-input <input type="file"> path: each File has no real
-      // path, so we go through base64 import — same flow used by SimpleChatInput.
       if (!files || files.length === 0 || isUploading) return;
+      const MAX_BATCH_BYTES = 100 * 1024 * 1024; // 100MB renderer cap
+      const totalBytes = Array.from(files).reduce((sum, f) => sum + f.size, 0);
+      if (totalBytes > MAX_BATCH_BYTES) {
+        setError(
+          `批量上传不能超过 ${MAX_BATCH_BYTES / 1024 / 1024} MB（当前 ${Math.round(totalBytes / 1024 / 1024)} MB）。大文件请直接拖拽到目录。`,
+        );
+        return;
+      }
       setIsUploading(true);
       try {
         const base64Files = await Promise.all(
@@ -972,17 +980,28 @@ const DirectoryPanel = memo(
       // Don't clear dropTargetPath here - let tree level handler or drop handler do it
     }, []);
 
-    // Move handler (used by both internal DnD and context menu)
+    // Move handler (used by both internal DnD and context menu).
+    // Cross-review caught: pre-fix this ignored `result.errors`, so partial
+    // failures (3 of 5 files moved, 2 errored due to permission / collision
+    // exhaustion) silently dropped on the floor — user saw 2 files vanish
+    // with no feedback. Surface partial failures via toast so the user knows
+    // why some moves didn't happen.
     const handleMove = useCallback(
       async (sourcePaths: string[], targetDir: string) => {
         try {
-          await fileService.movePaths({ sourcePaths, targetDir });
+          const result = await fileService.movePaths({ sourcePaths, targetDir });
+          if (result.errors && result.errors.length > 0) {
+            const moved = result.movedFiles?.length ?? 0;
+            toast.warning(
+              `已移动 ${moved} 项；${result.errors.length} 项失败：${result.errors[0]}`,
+            );
+          }
           refresh();
         } catch (err) {
           setError(err instanceof Error ? err.message : "Move failed");
         }
       },
-      [fileService, refresh],
+      [fileService, refresh, toast],
     );
 
     // --- Internal DnD via @dnd-kit (pointer-events based, reliable in Tauri WebView) ---
