@@ -18,6 +18,7 @@ import { useImageAttachments } from '@/hooks/useImageAttachments';
 import { HelperModelPicker, resolveInitialHelperModel } from '@/components/HelperModelPicker';
 import { dispatchHelperRequest } from '@/utils/dispatchHelperRequest';
 import { track } from '@/analytics';
+import Tip from '@/components/Tip';
 
 const PLACEHOLDER =
     '告诉 AI 小助理想做什么，配模型、加 MCP、查问题、吐槽反馈，提出你的要求，附上网页链接或截图，小助理都能帮你直接搞定！';
@@ -96,12 +97,12 @@ export default function SettingsHelperInbox({
     const hasValidModel = !!picked.providerId && !!picked.model;
     const canSend = hasContent && hasValidModel && !isSending;
 
-    const submitTitle = useMemo(() => {
-        if (!hasContent) return '请输入想做的事或附上图片';
-        if (!hasValidModel) return '请先配置模型';
-        const isMac = navigator.platform.toLowerCase().includes('mac');
-        return isMac ? '发送 (⌘Enter)' : '发送 (Ctrl+Enter)';
-    }, [hasContent, hasValidModel]);
+    const isMac = useMemo(() => navigator.platform.toLowerCase().includes('mac'), []);
+    const submitTip = useMemo(() => {
+        if (!hasContent) return { label: '请输入想做的事或附上图片', shortcut: undefined };
+        if (!hasValidModel) return { label: '请先配置模型', shortcut: undefined };
+        return { label: '发送', shortcut: isMac ? '⌘ Enter' : 'Ctrl Enter' };
+    }, [hasContent, hasValidModel, isMac]);
 
     const handleSend = useCallback(() => {
         if (!canSend) return;
@@ -205,21 +206,30 @@ export default function SettingsHelperInbox({
                     }}
                 />
 
+                {/* Toolbar layout mirrors SimpleChatInput (chat input):
+                    secondary tools on the left (attachment), primary
+                    actions clustered on the right (model picker + send),
+                    so users see the same affordance shape across surfaces. */}
                 <div className="flex items-center justify-between border-t border-[var(--line-subtle)] px-5 py-2">
                     <div className="flex items-center gap-1">
-                        <button
-                            type="button"
-                            onClick={() => fileInputRef.current?.click()}
-                            className="flex items-center rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                            title="添加图片"
-                        >
-                            <Paperclip className="h-3.5 w-3.5" />
-                        </button>
+                        <Tip label="添加图片" position="top">
+                            <button
+                                type="button"
+                                onClick={() => fileInputRef.current?.click()}
+                                className="flex items-center rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            >
+                                <Paperclip className="h-3.5 w-3.5" />
+                            </button>
+                        </Tip>
+                    </div>
+
+                    <div className="flex items-center gap-1">
                         <HelperModelPicker
                             providers={providers}
                             apiKeys={apiKeys}
                             verifyStatus={providerVerifyStatus}
                             value={picked}
+                            placement="top-end"
                             onChange={(providerId, model) => {
                                 // Persist to helper agent — disk state is the
                                 // single source of truth; the useMemo above
@@ -228,22 +238,22 @@ export default function SettingsHelperInbox({
                                 onModelChange?.(providerId, model);
                             }}
                         />
+                        <Tip label={submitTip.label} shortcut={submitTip.shortcut} position="top" align="end">
+                            <button
+                                type="button"
+                                onClick={handleSend}
+                                disabled={!canSend}
+                                className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                {isSending ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                    <Send className="h-3.5 w-3.5" />
+                                )}
+                                发送
+                            </button>
+                        </Tip>
                     </div>
-
-                    <button
-                        type="button"
-                        onClick={handleSend}
-                        disabled={!canSend}
-                        title={submitTitle}
-                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                        {isSending ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                            <Send className="h-3.5 w-3.5" />
-                        )}
-                        发送
-                    </button>
                 </div>
             </div>
         </div>

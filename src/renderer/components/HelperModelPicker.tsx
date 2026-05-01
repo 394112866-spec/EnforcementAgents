@@ -17,7 +17,7 @@ import { ChevronUp } from 'lucide-react';
 
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
 import { isProviderAvailable } from '@/config/configService';
-import { Popover } from '@/components/ui/Popover';
+import { Popover, type PopoverPlacement } from '@/components/ui/Popover';
 import { ModalityBadges } from '@/components/ModalityBadges';
 
 export interface HelperModelPickerValue {
@@ -34,7 +34,7 @@ export interface HelperModelPickerProps {
     /** Called when the user clicks the empty-state CTA (no provider configured). */
     onNavigateToProviders?: () => void;
     /** Popover placement. Default `'top-start'` (toolbar at bottom of card). */
-    placement?: 'top-start' | 'bottom-start';
+    placement?: PopoverPlacement;
     /**
      * Notified when the picker menu opens or closes. Surfaces that need to
      * coordinate Esc behavior (e.g. dialog Esc-to-close should defer to
