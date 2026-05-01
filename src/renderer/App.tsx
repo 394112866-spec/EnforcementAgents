@@ -88,6 +88,7 @@ interface TabContentProps {
   updateVersion: string | null;
   updateChecking: boolean;
   updateDownloading: boolean;
+  updateInstalling: boolean;
   onCheckForUpdate: () => Promise<'up-to-date' | 'downloading' | 'error'>;
   onRestartAndUpdate: () => void;
   // Task Center intent carried by the most recent OPEN_TASK_CENTER event.
@@ -101,7 +102,7 @@ const MemoizedTabContent = memo(function TabContent({
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   onClearJoinedExistingSidecar,
   settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
-  updateReady, updateVersion, updateChecking, updateDownloading,
+  updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling,
   onCheckForUpdate, onRestartAndUpdate,
   taskCenterPendingIntent,
 }: TabContentProps) {
@@ -128,6 +129,7 @@ const MemoizedTabContent = memo(function TabContent({
           updateVersion={updateVersion}
           updateChecking={updateChecking}
           updateDownloading={updateDownloading}
+          updateInstalling={updateInstalling}
           onCheckForUpdate={onCheckForUpdate}
           onRestartAndUpdate={onRestartAndUpdate}
         />
@@ -175,6 +177,7 @@ const MemoizedTabContent = memo(function TabContent({
     prev.updateVersion === next.updateVersion &&
     prev.updateChecking === next.updateChecking &&
     prev.updateDownloading === next.updateDownloading &&
+    prev.updateInstalling === next.updateInstalling &&
     // Reference equality — each OPEN_TASK_CENTER dispatch allocates a
     // fresh intent object (or `null`), so identity comparison is enough.
     // Without this line, a user re-clicking the Launcher's search icon
@@ -188,15 +191,14 @@ const MemoizedTabContent = memo(function TabContent({
 
 export default function App() {
   // Auto-update state (silent background updates)
-  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, checkForUpdate, pendingUpdateOnStartup, dismissPendingUpdate } = useUpdater();
+  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, installing: updateInstalling, checkForUpdate, pendingUpdateOnStartup, dismissPendingUpdate } = useUpdater();
 
   // Stable callback for Settings prop — ref pattern ensures memo comparator correctness
   const restartAndUpdateRef = useRef(restartAndUpdate);
   restartAndUpdateRef.current = restartAndUpdate;
 
-  const handleRestartAndUpdate = useCallback(() => {
-    void restartAndUpdateRef.current();
-  }, []);
+  // handleRestartAndUpdate is defined further down (after toastRef is declared)
+  // — see the `// Update install handler` block.
 
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
@@ -262,6 +264,23 @@ export default function App() {
   const toast = useToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
+
+  // Update install handler — toasts on failure so the user sees their click
+  // had an effect. Silent failure here was the root cause of "重启更新 button
+  // does nothing" reports on Windows: a flaky network would kill the install
+  // verification round-trip, the JS only console.warn-ed, and the user
+  // assumed the button was broken.
+  const handleRestartAndUpdate = useCallback(async () => {
+    const outcome = await restartAndUpdateRef.current();
+    if (outcome === 'network-error') {
+      toastRef.current?.error('无法验证更新（网络异常），请稍后重试');
+    } else if (outcome === 'version-mismatch') {
+      toastRef.current?.info('已下载的更新已过期，正在重新下载新版本…');
+    } else if (outcome === 'error') {
+      toastRef.current?.error('安装更新失败，请重试或前往设置页手动重新检查');
+    }
+    // 'ok' → process is exiting via NSIS/relaunch, no toast needed
+  }, []);
 
   // Per-tab loading state (keyed by tabId)
   const [loadingTabs, setLoadingTabs] = useState<Record<string, boolean>>({});
@@ -2095,7 +2114,8 @@ export default function App() {
         onOpenBugReport={() => setShowBugReport(true)}
         updateReady={updateReady}
         updateVersion={updateVersion}
-        onRestartAndUpdate={() => void restartAndUpdate()}
+        updateInstalling={updateInstalling}
+        onRestartAndUpdate={() => void handleRestartAndUpdate()}
       >
         <TabBar
           tabs={tabs}
@@ -2136,6 +2156,7 @@ export default function App() {
             updateVersion={updateVersion}
             updateChecking={updateChecking}
             updateDownloading={updateDownloading}
+            updateInstalling={updateInstalling}
             onCheckForUpdate={checkForUpdate}
             onRestartAndUpdate={handleRestartAndUpdate}
             taskCenterPendingIntent={taskCenterPendingIntent}
@@ -2172,7 +2193,9 @@ export default function App() {
           confirmVariant="primary"
           onConfirm={() => {
             dismissPendingUpdate();
-            void restartAndUpdate();
+            // Route through handleRestartAndUpdate so toast feedback fires
+            // on failure modes (network error / version mismatch).
+            void handleRestartAndUpdate();
           }}
           onCancel={dismissPendingUpdate}
         />

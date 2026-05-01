@@ -25,17 +25,25 @@ export interface UpdateReadyInfo {
 /** Result of a manual update check, used by caller for user-facing feedback (toast) */
 export type CheckUpdateResult = 'up-to-date' | 'downloading' | 'error';
 
+/** Result of restartAndUpdate, used by caller to show an error toast. 'ok' means
+ *  install actually started (process is about to exit) — the renderer just won't
+ *  see the resolution because Rust calls exit(0). */
+export type RestartUpdateResult = 'ok' | 'network-error' | 'version-mismatch' | 'error';
+
 interface UseUpdaterResult {
     /** Whether an update has been downloaded and is ready to install */
     updateReady: boolean;
     /** The version that's ready to install */
     updateVersion: string | null;
-    /** Restart the app to apply the update */
-    restartAndUpdate: () => Promise<void>;
+    /** Restart the app to apply the update. Returns the outcome so the caller
+     *  can surface a toast for failure modes. */
+    restartAndUpdate: () => Promise<RestartUpdateResult>;
     /** Whether a manual check is in progress */
     checking: boolean;
     /** Whether an update is being downloaded */
     downloading: boolean;
+    /** Whether an install is currently in flight (button click → install start) */
+    installing: boolean;
     /** Manually trigger an update check. Returns result for caller to show toast feedback. */
     checkForUpdate: () => Promise<CheckUpdateResult>;
     /** Version of a pending update discovered on startup (Windows only, from disk) */
@@ -55,6 +63,7 @@ export function useUpdater(): UseUpdaterResult {
     const [updateVersion, setUpdateVersion] = useState<string | null>(null);
     const [checking, setChecking] = useState(false);
     const [downloading, setDownloading] = useState(false);
+    const [installing, setInstalling] = useState(false);
     // Windows: version from disk-persisted pending update (shown as startup dialog)
     const [pendingUpdateOnStartup, setPendingUpdateOnStartup] = useState<string | null>(null);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -63,6 +72,7 @@ export function useUpdater(): UseUpdaterResult {
     // State values in a useCallback closure can be stale; refs are always current.
     const checkingRef = useRef(false);
     const downloadingRef = useRef(false);
+    const installingRef = useRef(false);
     // Cache app version — it never changes during a session, no need to IPC every time.
     const appVersionRef = useRef<string | null>(null);
 
@@ -147,9 +157,21 @@ export function useUpdater(): UseUpdaterResult {
         setPendingUpdateOnStartup(null);
     }, []);
 
-    // Restart app to apply the update
-    const restartAndUpdate = useCallback(async () => {
-        if (!isTauriEnvironment()) return;
+    // Restart app to apply the update.
+    //
+    // Returns the outcome so callers can show user feedback (toast).
+    // On success the renderer never resumes — the OS process exits via NSIS
+    // (Windows) or relaunch (macOS).
+    //
+    // Important: on Windows we no longer call cmd_shutdown_for_update from
+    // here. The Rust install_pending_update handles shutdown internally,
+    // AFTER it has resolved a usable Update object. Pre-killing the user's
+    // sidecars and then failing the install (e.g., flaky network) was the
+    // root cause of the "click does nothing" reports — the user was left in
+    // a broken state with the install never actually starting.
+    const restartAndUpdate = useCallback(async (): Promise<RestartUpdateResult> => {
+        if (!isTauriEnvironment()) return 'error';
+        if (installingRef.current) return 'ok';  // already in flight
 
         // Track update_install event before restarting
         if (updateVersion) {
@@ -158,51 +180,63 @@ export function useUpdater(): UseUpdaterResult {
             track('update_install');
         }
 
-        // Shut down all child processes first to prevent file-lock errors
-        // (Windows NSIS installer fails if bun.exe is still held by SDK/MCP processes)
-        try {
-            await invoke('cmd_shutdown_for_update');
-        } catch (err) {
-            console.warn('[useUpdater] Pre-restart cleanup failed:', err);
-            // Continue anyway — startup cleanup_stale_sidecars will handle leftovers
-        }
+        installingRef.current = true;
+        setInstalling(true);
 
         // Windows: use install_pending_update which launches NSIS from saved bytes
         // This avoids relaunch() which would just restart without applying the update
         if (isWindows) {
             try {
                 await invoke('install_pending_update');
-                // install_pending_update calls exit(0) on Windows, so we won't reach here
+                // install_pending_update calls exit(0) on Windows, so we won't reach here.
+                return 'ok';
             } catch (err) {
                 const errStr = String(err);
+                installingRef.current = false;
+                setInstalling(false);
                 if (errStr.includes('VERSION_MISMATCH')) {
                     console.warn('[useUpdater] Pending update version mismatch, will re-download');
                     setUpdateReady(false);
                     setUpdateVersion(null);
                     setPendingUpdateOnStartup(null);
-                    // Trigger a fresh download
+                    // Trigger a fresh download (silent — toast tells user what's up)
                     void invoke('check_and_download_update');
-                } else if (errStr.includes('NETWORK_ERROR')) {
-                    // Offline: update bytes are on disk but we can't verify version.
-                    // Keep the update ready state so user can retry when online.
-                    console.warn('[useUpdater] Network required to verify update, will retry when online');
-                } else {
-                    console.error('[useUpdater] install_pending_update failed:', err);
+                    return 'version-mismatch';
                 }
+                if (errStr.includes('NETWORK_ERROR')) {
+                    // Network was unreachable for all retries. Keep the
+                    // update-ready state so the user can retry once online.
+                    console.warn('[useUpdater] Network required to verify update, will retry when online');
+                    return 'network-error';
+                }
+                console.error('[useUpdater] install_pending_update failed:', err);
+                return 'error';
             }
-            return;
         }
 
-        // macOS: relaunch picks up the already-installed update
+        // macOS: relaunch picks up the already-installed update.
+        // Sidecar shutdown still helps on macOS (releases child processes),
+        // and the install was already done at download time, so failure
+        // here just means we couldn't gracefully reboot — not as severe as
+        // the Windows pre-shutdown failure mode.
+        try {
+            await invoke('cmd_shutdown_for_update');
+        } catch (err) {
+            console.warn('[useUpdater] Pre-restart cleanup failed:', err);
+        }
         try {
             await relaunch();
+            return 'ok';
         } catch (err) {
             console.error('[useUpdater] Restart failed:', err);
-            // Fallback: try invoking the Rust command
             try {
                 await invoke('restart_app');
+                return 'ok';
             } catch (e) {
                 console.error('[useUpdater] Rust restart also failed:', e);
+                installingRef.current = false;
+                setInstalling(false);
+                return 'error';
             }
         }
     }, [updateVersion]);
@@ -313,6 +347,7 @@ export function useUpdater(): UseUpdaterResult {
         restartAndUpdate,
         checking,
         downloading,
+        installing,
         checkForUpdate,
         pendingUpdateOnStartup,
         dismissPendingUpdate,

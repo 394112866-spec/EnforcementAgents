@@ -154,6 +154,8 @@ interface SettingsProps {
     updateChecking?: boolean;
     /** Whether an update is being downloaded (from useUpdater) */
     updateDownloading?: boolean;
+    /** Whether an install is currently in flight (post-click, from useUpdater) */
+    updateInstalling?: boolean;
     /** Trigger manual update check. Returns result for toast feedback. */
     onCheckForUpdate?: () => Promise<'up-to-date' | 'downloading' | 'error'>;
     /** Restart and install update (from useUpdater) */
@@ -173,7 +175,7 @@ async function getPlaywrightDefaultArgs(): Promise<string[]> {
 /** Playwright device presets shared between parser and UI */
 const PLAYWRIGHT_DEVICE_PRESETS = ['iPhone 15 Pro', 'iPhone 15', 'iPhone SE', 'iPad Pro 11', 'Pixel 7', 'Galaxy S23'];
 
-export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
+export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -3024,10 +3026,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             <span className="text-sm text-[var(--success)]">发现新版本 v{propUpdateVersion}</span>
                                             <button
                                                 type="button"
-                                                onClick={onRestartAndUpdate}
-                                                className="rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90"
+                                                onClick={updateInstalling ? undefined : onRestartAndUpdate}
+                                                disabled={updateInstalling}
+                                                className="rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90 disabled:opacity-80 disabled:cursor-wait"
                                             >
-                                                重启安装
+                                                {updateInstalling ? '安装中…' : '重启安装'}
                                             </button>
                                         </div>
                                     )}
