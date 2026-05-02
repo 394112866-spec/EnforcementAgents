@@ -113,6 +113,7 @@ pub fn run() {
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_monitor = sidecar_state.clone();
     let sidecar_state_for_session_monitor = sidecar_state.clone();
+    let sidecar_state_for_terminal_forwarder = sidecar_state.clone();
 
     let im_state_for_management = im_bot_state.clone();
     let agent_state_for_management = agent_state.clone();
@@ -133,6 +134,7 @@ pub fn run() {
     let cleanup_done_for_monitor = cleanup_done.clone();
     let cleanup_done_for_session_monitor = cleanup_done.clone();
     let cleanup_done_for_agent_monitor = cleanup_done.clone();
+    let cleanup_done_for_terminal_forwarder = cleanup_done.clone();
 
     // Create terminal manager state
     let terminal_state = terminal::TerminalManager::new();
@@ -655,6 +657,31 @@ pub fn run() {
                     Err(e) => log::error!("[App] Failed to start management API: {}", e),
                 }
             });
+
+            // Bridge `SidecarManager::terminal_events` → `session:sidecar-terminal`
+            // Tauri event. Renderer's App.tsx listens and resets `tab.sessionId`
+            // bindings whose underlying sidecar has been definitively released
+            // (no owners remained at removal → no auto-restart will revive it).
+            // Without this bridge, voluntary-release leaves stale Tab.sessionId
+            // values which `planSessionOpen` then "jump-to-tab"s into → empty
+            // UI + sidecar-not-running errors. See `forward_terminal_events_to_renderer`
+            // doc-comment for the full rationale.
+            //
+            // Spawn order: BEFORE cron/IM auto-start so any sidecar created
+            // and terminally-removed by those subsystems on startup is captured.
+            // The forwarder subscribes synchronously inside the spawned task
+            // (first await is `rx.recv()`); broadcast channel buffers up to 64
+            // events so the few-millisecond gap before `subscribe()` runs is
+            // covered. (Codex review ADV-4.)
+            let app_handle_for_terminal_forwarder = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                sidecar::forward_terminal_events_to_renderer(
+                    app_handle_for_terminal_forwarder,
+                    sidecar_state_for_terminal_forwarder,
+                    cleanup_done_for_terminal_forwarder,
+                ).await;
+            });
+            ulog_info!("[App] Sidecar terminal-event forwarder spawned");
 
             // Initialize cron task manager with app handle
             let cron_app_handle = app.handle().clone();

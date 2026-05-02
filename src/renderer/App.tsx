@@ -33,6 +33,7 @@ import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { normalizeRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
+import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
@@ -410,6 +411,8 @@ export default function App() {
     let unlistenTaskRecovered: (() => void) | null = null;
     let unlistenBgComplete: (() => void) | null = null;
     let unlistenSidecarRestarted: (() => void) | null = null;
+    let unlistenSessionTerminal: (() => void) | null = null;
+    let unlistenSessionTerminalReconcile: (() => void) | null = null;
 
     const setupCronRecoveryListeners = async () => {
       if (!isTauriEnvironment()) return;
@@ -483,6 +486,95 @@ export default function App() {
             markGlobalSidecarReady();
           }
         });
+
+        // session:sidecar-terminal — emitted by Rust ONLY when a Session
+        // Sidecar is removed with no remaining owners (so the health monitor
+        // will not auto-restart it). This is the single source of truth for
+        // "the underlying session is gone for good"; reset any Tab whose
+        // sessionId matches so the next `planSessionOpen` doesn't jump-to-tab
+        // into a Tab whose sidecar has been dead for hours. The crash-with-
+        // owners path stays handled by `session-sidecar:restarted` in
+        // TabProvider — this listener deliberately doesn't fire for that case.
+        //
+        // Stale-event guard (Codex review CRIT-1): a same-session-id relaunch
+        // can happen between Rust emitting and us receiving the event (user
+        // clicks history → Scenario 4 spins up a fresh sidecar with a higher
+        // generation — Rust's `instance_counter` guarantees uniqueness). The
+        // stale terminal event would then wipe a tab that's already bound to
+        // the live new sidecar. Re-query Rust at handling time: if a sidecar
+        // entry exists for this sessionId NOW, the event is stale and the
+        // current binding must NOT be cleared.
+        unlistenSessionTerminal = await listen<{ sessionId: string; generation: number }>(
+          'session:sidecar-terminal',
+          async (event) => {
+            if (!mountedRef.current) return;
+            const { sessionId, generation } = event.payload;
+            // Presence check — Rust returns a port iff a sidecar entry
+            // exists in the manager (a relaunch since the event was emitted
+            // would re-create one with a fresh generation). Non-null ⇒
+            // event is stale; current binding is valid. (`getSessionPort`
+            // is presence, not process-health — adequate here.)
+            const livePort = await getSessionPort(sessionId);
+            if (livePort !== null) {
+              console.log(
+                `[App] Ignoring stale terminal event for ${sessionId} (gen=${generation}) — live sidecar present on port ${livePort}`
+              );
+              return;
+            }
+            if (!mountedRef.current) return;
+            setTabs((prev) => {
+              const next = applyTerminalSessionToTabs(prev, sessionId);
+              if (next !== prev) {
+                console.log(`[App] Tab.sessionId reset for terminated session ${sessionId}`);
+              }
+              return next as typeof prev;
+            });
+          }
+        );
+
+        // Reconcile path — Rust emits this when its terminal_events broadcast
+        // lagged (capacity 64 exceeded by a shutdown burst). Payload is the
+        // currently-live session id list snapshotted at lag-detection time;
+        // any Tab.sessionId NOT in that set is suspect.
+        //
+        // Two layers of guarding (Codex review CRIT-2):
+        //  (1) The snapshot can be stale by the time we receive — for each
+        //      suspect, re-query Rust live state and only treat it as gone
+        //      if Rust currently has no sidecar for that id.
+        //  (2) Candidates are taken from a tabsRef snapshot; new tabs may
+        //      appear during our async work. To avoid clearing those, we
+        //      apply cleanup tab-by-tab via `applyTerminalSessionToTabs`
+        //      against the *current* prev, and only for the exact session
+        //      ids we definitively confirmed gone.
+        unlistenSessionTerminalReconcile = await listen<{ liveSessionIds: string[] }>(
+          'session:sidecar-terminal-reconcile',
+          async (event) => {
+            if (!mountedRef.current) return;
+            const stillLive = new Set<string>(event.payload.liveSessionIds);
+            const candidates = tabsRef.current
+              .filter((t) => t.sessionId && !isPendingSessionId(t.sessionId))
+              .map((t) => t.sessionId as string)
+              .filter((sid) => !stillLive.has(sid));
+            const goneIds: string[] = [];
+            await Promise.all(
+              candidates.map(async (sid) => {
+                const port = await getSessionPort(sid);
+                if (port === null) goneIds.push(sid);
+              })
+            );
+            if (!mountedRef.current || goneIds.length === 0) return;
+            setTabs((prev) => {
+              let next = prev;
+              for (const sid of goneIds) {
+                next = applyTerminalSessionToTabs(next, sid) as typeof prev;
+              }
+              if (next !== prev) {
+                console.log(`[App] Reconcile cleared ${goneIds.length} stale binding(s)`);
+              }
+              return next;
+            });
+          }
+        );
       } catch (error) {
         console.error('[App] Failed to setup cron recovery listeners:', error);
       }
@@ -512,6 +604,12 @@ export default function App() {
       }
       if (unlistenSidecarRestarted) {
         unlistenSidecarRestarted();
+      }
+      if (unlistenSessionTerminal) {
+        unlistenSessionTerminal();
+      }
+      if (unlistenSessionTerminalReconcile) {
+        unlistenSessionTerminalReconcile();
       }
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();
@@ -866,11 +964,42 @@ export default function App() {
         console.log(`[App] handleLaunchProject: session-open plan=${plan.type}${plan.type === 'open-new-tab' ? ` reason=${plan.reason}` : ''}, target=${sessionId}`);
 
         if (plan.type === 'jump-to-tab') {
-          console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${plan.tabId}, jumping to it`);
-          setActiveTabId(plan.tabId);
-          setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
-          launchingTabRef.current = null;
-          return;
+          // Defensive presence check — race window between Rust emitting
+          // `session:sidecar-terminal` and the renderer applying the cleanup.
+          // The terminal-event listener above is the primary fix (clears
+          // stale Tab.sessionId), but if the user clicks task center inside
+          // that tiny window, the planner can still match the not-yet-cleaned
+          // tab and we'd "jump" to a tab whose sidecar is dead. A direct
+          // `getSessionPort` query asks Rust whether ANY sidecar entry
+          // currently exists for this session id (this is presence, not
+          // process-health — sufficient for "is something around to talk to"
+          // because the auto-restart path keeps the entry resident through
+          // brief restart windows). Null means the manager has nothing,
+          // which is the exact stale-binding case. Fall through to
+          // Scenario 4 (`ensureSessionSidecar` re-spawns the session, adds
+          // this Tab as owner) so the user always gets a working session,
+          // never an empty UI. (Codex review AI-2 wording fix.)
+          const livePort = await getSessionPort(sessionId);
+          if (livePort === null) {
+            console.warn(
+              `[App] Scenario 1 stale: tab ${plan.tabId} bound to session ${sessionId} but no live sidecar — falling through to relaunch`
+            );
+            // Continue to Scenario 4 below. We do NOT pre-rewrite the tab's
+            // sessionId here (the terminal-event listener will catch up
+            // shortly, and Scenario 4's setTabs at the tail of this function
+            // sets it authoritatively after `ensureSessionSidecar` succeeds).
+            targetTabId = plan.tabId;
+            if (plan.tabId !== activeTabId) {
+              setActiveTabId(plan.tabId);
+            }
+            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [plan.tabId]: true }));
+          } else {
+            console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${plan.tabId}, jumping to it`);
+            setActiveTabId(plan.tabId);
+            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+            launchingTabRef.current = null;
+            return;
+          }
         }
 
         if (plan.type === 'open-new-tab') {
@@ -1018,14 +1147,20 @@ export default function App() {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[App] Failed to start:', errorMsg);
-      setTabErrors((prev) => ({ ...prev, [activeTabId]: errorMsg }));
+      // Surface the error on the tab the user is actually looking at — when
+      // the stale jump-to-tab fallthrough rerouted us to `plan.tabId`, the
+      // visible tab is `targetTabId`, not the originally-active one. Writing
+      // to `activeTabId` would silently drop the error on a hidden tab while
+      // the user stares at a stuck loader. (Codex review WARN-2.)
+      const errorTabId = targetTabId !== activeTabId ? targetTabId : activeTabId;
+      setTabErrors((prev) => ({ ...prev, [errorTabId]: errorMsg }));
 
       // In browser dev mode, still allow navigation
       if (isBrowserDevMode()) {
         console.log('[App] Browser mode: continuing despite error');
         setTabs((prev) =>
           prev.map((t) =>
-            t.id === activeTabId
+            t.id === errorTabId
               ? {
                 ...t,
                 agentDir: project.path,
