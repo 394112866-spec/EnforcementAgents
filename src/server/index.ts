@@ -3019,6 +3019,11 @@ async function main() {
         interface PatchPayload {
           title?: string;
           titleSource?: 'default' | 'auto' | 'user';
+          /** Pin/unpin to the 收藏 filter view. Storage convention: only
+           *  `true` is persisted; `false` is stored as `undefined` so a
+           *  freshly toggled-off session matches "never favorited" exactly
+           *  on disk. */
+          favorite?: boolean;
           model?: string | null;
           permissionMode?: string | null;
           mcpEnabledServers?: string[] | null;
@@ -3036,6 +3041,11 @@ async function main() {
         const updates: Record<string, unknown> = { lastActiveAt: new Date().toISOString() };
         if (payload.title !== undefined) updates.title = String(payload.title).slice(0, 100);
         if (payload.titleSource !== undefined) updates.titleSource = payload.titleSource;
+        if (payload.favorite !== undefined) {
+          // Convert false → undefined so the on-disk shape stays minimal
+          // (the JSON serializer drops undefined keys).
+          updates.favorite = payload.favorite === true ? true : undefined;
+        }
 
         // Snapshot fields: null → clear (undefined in stored JSON); value → set.
         // `undefined` in stored metadata is how the resolver recognizes "fall back to agent".
