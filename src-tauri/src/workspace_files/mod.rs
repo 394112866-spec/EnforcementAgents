@@ -23,9 +23,12 @@
 //! transition.
 
 pub mod check_paths;
+pub mod claude_md;
 pub mod crud;
 pub mod delete;
 pub mod download;
+pub mod save_file;
+pub mod skill_sync;
 pub mod files_b64;
 pub mod git_branch;
 pub mod gitignore;

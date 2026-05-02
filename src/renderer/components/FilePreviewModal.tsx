@@ -9,16 +9,17 @@
  *   is purely a view switch.
  *
  * Edit capability comes from two sources (either is sufficient):
- * 1. Tab API (useTabApiOptional) — when rendered inside a Tab context
- * 2. Explicit onSave/onRevealFile props — when caller provides save logic directly
+ * 1. `workspacePath` prop — Rust workspace_files via `useWorkspaceFileService`
+ * 2. Explicit `onSave`/`onRevealFile` props — when caller provides save logic directly
+ *    (e.g. Settings panels editing `~/.myagents/agents/...`)
  */
 import { AtSign, Check, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, X } from 'lucide-react';
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
-import { useTabApiOptional } from '@/context/TabContext';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { getMonacoLanguage, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
@@ -214,11 +215,14 @@ export default function FilePreviewModal({
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    const tabApi = useTabApiOptional();
-    const apiPost = tabApi?.apiPost;
+    const fileService = useWorkspaceFileService(workspacePath);
 
-    // Edit: Tab API OR explicit onSave prop.
-    const canEdit = !!(apiPost || onSave);
+    // Phase E (PRD 0.2.7): the legacy `apiPost('/agent/save-file')` fallback
+    // is removed — workspace edits go through Rust workspace_files
+    // exclusively. Edit is enabled when `workspacePath` is provided
+    // (fileService.saveFile path) OR an explicit `onSave` prop overrides
+    // (Settings panels editing `~/.myagents/agents/...`).
+    const canEdit = !!(workspacePath || onSave);
     // Reveal: only when caller provides `onRevealFile`. Phase D.5 red-line:
     // workspace file ops must go through Rust workspace_files (the caller
     // wraps `fileService.openInFinder`), not sidecar HTTP. Removing the
@@ -272,25 +276,26 @@ export default function FilePreviewModal({
     // Stable refs for save dependencies to avoid re-creating callbacks
     const onSaveRef = useRef(onSave);
     onSaveRef.current = onSave;
-    const apiPostRef = useRef(apiPost);
-    apiPostRef.current = apiPost;
+    const fileServiceRef = useRef(fileService);
+    fileServiceRef.current = fileService;
     const pathRef = useRef(path);
     pathRef.current = path;
     const onSavedRef = useRef(onSaved);
     onSavedRef.current = onSaved;
 
-    /** Core save function — saves the given content string */
+    /** Core save function — saves the given content string. Phase E (PRD 0.2.7):
+     *  workspace-relative paths go through `fileService.saveFile` (Rust
+     *  `cmd_workspace_save_file`); explicit `onSave` prop still takes
+     *  precedence for non-workspace surfaces (Settings panels editing
+     *  `~/.myagents/...` files via direct fs writes). */
     const executeSave = useCallback(async (contentToSave: string) => {
         if (onSaveRef.current) {
             await onSaveRef.current(contentToSave);
-        } else if (apiPostRef.current) {
-            const response = await apiPostRef.current<{ success: boolean; error?: string }>(
-                '/agent/save-file',
-                { path: pathRef.current, content: contentToSave }
-            );
-            if (!response.success) {
-                throw new Error(response.error ?? '保存失败');
-            }
+        } else if (fileServiceRef.current.isAvailable) {
+            await fileServiceRef.current.saveFile({
+                path: pathRef.current,
+                content: contentToSave,
+            });
         }
     }, []); // stable — all deps via refs
 

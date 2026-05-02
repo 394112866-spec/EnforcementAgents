@@ -11,13 +11,13 @@
 //! `SlashCommand[]` so the frontend can swap between the two without code
 //! changes.
 //!
-//! IMPORTANT: this command is **read-only**. It does NOT perform the symlink
-//! sync that `/api/commands` does as a side-effect. The symlink sync is needed
-//! at SDK query time (so the Claude SDK can find skill files), and lives in
-//! sidecar / session-start hook. Listing commands for the picker UI doesn't
-//! need the sync — listing just reads frontmatter. Keeping the two concerns
-//! separate makes the Rust path safe to call from anywhere (launcher, mid-
-//! session, etc) without surprising filesystem mutations.
+//! Phase E (PRD 0.2.7): this command now ALSO performs the symlink sync
+//! that `/api/commands` used to do — `sync_workspace_skills` runs before the
+//! scan so launcher (no sidecar) keeps `<workspace>/.claude/skills` symlinks
+//! fresh just like a chat tab does. The sync is idempotent and cheap when
+//! nothing has changed (just stat ops). The sidecar's
+//! `syncSkillsIfNeeded` wrapper is removed; CRUD-time sync still happens
+//! sidecar-side via `syncProjectUserConfig` for tab-local immediacy.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::path_safety::validate_external_read_path;
+use super::skill_sync::sync_workspace_skills;
 
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("compact", "压缩对话历史，释放上下文空间"),
@@ -106,6 +107,21 @@ pub async fn cmd_list_slash_commands(
     };
     let workspace_exists = workspace_root.is_dir();
 
+    // Sync user-level skills/commands into the workspace's `.claude/`
+    // BEFORE scanning, so skills the user enabled in another tab / global
+    // settings show up immediately. Best-effort — failures are logged inside
+    // `sync_workspace_skills` and don't block the scan (worst case the user
+    // sees a slightly stale picker, not a crash).
+    if workspace_exists {
+        if let Err(e) = sync_workspace_skills(&workspace_root) {
+            crate::ulog_warn!(
+                "[slash] skill sync failed for {}: {}",
+                workspace_root.display(),
+                e
+            );
+        }
+    }
+
     let home_dir = dirs::home_dir().ok_or_else(|| "home dir unavailable".to_string())?;
     let myagents_root = home_dir.join(".myagents");
 
@@ -180,8 +196,13 @@ pub async fn cmd_list_slash_commands(
 }
 
 fn read_skills_config(myagents_root: &Path) -> SkillsConfig {
-    let path = myagents_root.join("skills").join(".config.json");
-    if !path.exists() {
+    // Cross-review caught: the sidecar canonical path is
+    // `~/.myagents/skills-config.json` (NOT `~/.myagents/skills/.config.json`,
+    // which the previous version wrongly read — file never exists, so
+    // `disabled` always defaulted to empty). Match the sidecar path so user
+    // disable toggles in Settings actually take effect in the slash menu.
+    let path = myagents_root.join("skills-config.json");
+    if !path.is_file() {
         return SkillsConfig::default();
     }
     match std::fs::read_to_string(&path) {

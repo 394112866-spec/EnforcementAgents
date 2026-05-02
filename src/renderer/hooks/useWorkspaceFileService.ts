@@ -142,6 +142,22 @@ interface CheckPathsResult {
   results: Record<string, PathInfo>;
 }
 
+interface SaveFileResult {
+  success: boolean;
+}
+
+interface ReadClaudeMdResult {
+  success: boolean;
+  exists: boolean;
+  path: string;
+  content: string;
+}
+
+interface WriteClaudeMdResult {
+  success: boolean;
+  path: string;
+}
+
 // Phase D.5 — token-based watcher handle. The renderer holds `token` for the
 // lifetime of the watch, then passes it to `watchStop`. `eventKey` is the
 // suffix to subscribe to via Tauri `listen()`.
@@ -238,6 +254,15 @@ export interface WorkspaceFileService {
    *  name, revoke }`. Caller MUST call `revoke()` on cleanup to free the
    *  object URL. */
   readFileAsBlobUrl(args: { path: string }): Promise<BlobUrlHandle>;
+  /** [requires workspace] Save edited content back to a workspace file.
+   *  The file MUST already exist (no create-on-save). 512KB content cap.
+   *  Atomic via tmp + rename. */
+  saveFile(args: { path: string; content: string }): Promise<SaveFileResult>;
+  /** [requires workspace] Read `<workspace>/CLAUDE.md`. `exists:false` is
+   *  not an error — Settings UI shows an empty editor in that case. */
+  readClaudeMd(): Promise<ReadClaudeMdResult>;
+  /** [requires workspace] Write `<workspace>/CLAUDE.md`. Creates if missing. */
+  writeClaudeMd(args: { content: string }): Promise<WriteClaudeMdResult>;
   /** [requires workspace] */
   gitBranch(): Promise<GitBranchResult>;
   /** [requires workspace] Start the per-workspace fs watcher (ref-counted
@@ -513,6 +538,39 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
+  const saveFile: WorkspaceFileService['saveFile'] = useCallback(
+    async ({ path, content }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<SaveFileResult>('cmd_workspace_save_file', {
+        workspace: ws,
+        path,
+        content,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const readClaudeMd: WorkspaceFileService['readClaudeMd'] = useCallback(
+    async () => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<ReadClaudeMdResult>('cmd_workspace_read_claude_md', {
+        workspace: ws,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const writeClaudeMd: WorkspaceFileService['writeClaudeMd'] = useCallback(
+    async ({ content }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<WriteClaudeMdResult>('cmd_workspace_write_claude_md', {
+        workspace: ws,
+        content,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
   const gitBranch: WorkspaceFileService['gitBranch'] = useCallback(async () => {
     const ws = requireWorkspace();
     return invokeIfTauri<GitBranchResult>('cmd_workspace_git_branch', { workspace: ws });
@@ -560,6 +618,9 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       openPathExternal,
       checkPaths,
       readFileAsBlobUrl,
+      saveFile,
+      readClaudeMd,
+      writeClaudeMd,
       gitBranch,
       watchStart,
       watchStop,
@@ -587,6 +648,9 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       openPathExternal,
       checkPaths,
       readFileAsBlobUrl,
+      saveFile,
+      readClaudeMd,
+      writeClaudeMd,
       gitBranch,
       watchStart,
       watchStop,
