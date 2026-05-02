@@ -3038,7 +3038,27 @@ async function main() {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
-        const updates: Record<string, unknown> = { lastActiveAt: new Date().toISOString() };
+        // `lastActiveAt` is the recency signal that drives history sort
+        // order. Bumping it on EVERY PATCH means a pure-UI flag change
+        // (favorite toggle) makes an old session jump to the top of the
+        // dropdown — confusing UX (Codex round-4 caught). Only the fields
+        // that genuinely represent "session was used" should refresh it.
+        const RECENCY_BUMP_FIELDS = new Set([
+          'title',           // user-edited title implies engagement
+          'titleSource',
+          'model',
+          'permissionMode',
+          'mcpEnabledServers',
+          'providerId',
+          'providerEnvJson',
+        ]);
+        const touchedRecencyField = (Object.keys(payload) as Array<keyof PatchPayload>)
+          .filter((k) => payload[k] !== undefined)
+          .some((k) => RECENCY_BUMP_FIELDS.has(k));
+
+        const updates: Record<string, unknown> = touchedRecencyField
+          ? { lastActiveAt: new Date().toISOString() }
+          : {};
         if (payload.title !== undefined) updates.title = String(payload.title).slice(0, 100);
         if (payload.titleSource !== undefined) updates.titleSource = payload.titleSource;
         if (payload.favorite !== undefined) {
@@ -3070,7 +3090,7 @@ async function main() {
           updates.configSnapshotAt = new Date().toISOString();
         }
 
-        const updated = await updateSessionMetadata(sessionId, updates as Parameters<typeof updateSessionMetadata>[1]);
+        const updated = await updateSessionMetadata(sessionId, updates);
 
         if (!updated) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);

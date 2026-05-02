@@ -212,8 +212,16 @@ export default memo(function TaskCenterOverlay({
         setStatsSession({ id: session.id, title: getSessionDisplayText(session) });
     }, []);
 
+    // Per-session in-flight guard — Codex round-4 caught: rapid double-click
+    // on the star can fire two `updateSession` PATCHes whose responses arrive
+    // out of order, leaving disk and UI disagreeing about the final state.
+    // Block re-entry while a toggle is pending for THIS session id.
+    const favoriteInFlightRef = useRef<Set<string>>(new Set());
+
     const handleToggleFavorite = useCallback(async (e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
+        if (favoriteInFlightRef.current.has(session.id)) return;
+        favoriteInFlightRef.current.add(session.id);
         const next = !session.favorite;
         try {
             const result = await updateSession(session.id, { favorite: next });
@@ -225,10 +233,22 @@ export default memo(function TaskCenterOverlay({
             // the disk truth and the 收藏 filter view updates immediately.
             // Force=true ignores the freshness TTL — toggling favorites is
             // explicit user intent that should never be silently coalesced.
+            //
+            // Note: SessionHistoryDropdown does an optimistic local mutation
+            // here and reverts on failure. We use fire-and-refresh because
+            // the source of truth (`sessions`) lives in `useTaskCenterData`'s
+            // immutable hook state — mutating it would mean threading a
+            // patch helper through the hook just to feed one optimistic UI
+            // path. The refresh round-trip is ~50ms in practice; if a third
+            // 收藏 surface appears or perceived latency becomes a complaint,
+            // lift to a `useToggleFavorite()` hook with shared optimistic
+            // state.
             refresh('all', { force: true, reason: 'toggle-favorite', silent: true });
         } catch (err) {
             console.error('[TaskCenterOverlay] Toggle favorite failed:', err);
             toast.error('收藏失败');
+        } finally {
+            favoriteInFlightRef.current.delete(session.id);
         }
     }, [refresh, toast]);
 

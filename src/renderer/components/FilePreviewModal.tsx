@@ -195,6 +195,11 @@ function FilenameSlot({
             disabled={busy}
             onChange={(e) => onDraftChange(e.target.value)}
             onKeyDown={(e) => {
+                // IME composition guard: in CJK input, Enter often confirms
+                // the candidate selection rather than submitting the form.
+                // `nativeEvent.isComposing` is the cross-browser hint that
+                // a composition is in progress; let the IME consume it.
+                if (e.nativeEvent.isComposing) return;
                 if (e.key === 'Enter') {
                     e.preventDefault();
                     onCommit(draft);
@@ -359,6 +364,20 @@ export default function FilePreviewModal({
         setSavedContent(content);
     }, [content, path, name]);
 
+    // Reset markdown view-mode + cancel any in-flight inline rename when the
+    // file identity changes. Modal is reused for split-view file switches
+    // (Chat.tsx mounts one instance and updates props); without these resets,
+    //   - opening a new note via 「新建笔记」 with `initialEditMode=true` while
+    //     the previous file was in 'preview' mode keeps the old mode (Codex
+    //     round-4 CRIT-2);
+    //   - a rename draft from file A could commit against file B if the user
+    //     switches files mid-rename.
+    useEffect(() => {
+        setMdViewMode(initialEditMode ? 'edit' : 'preview');
+        setIsEditingName(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only path drives this; initialEditMode is read but does not retrigger
+    }, [path]);
+
     // Large files: force plaintext to skip tokenization
     const effectiveMonacoLanguage = useMemo(() => {
         if (size > LARGE_FILE_TOKENIZATION_THRESHOLD) return 'plaintext';
@@ -408,6 +427,12 @@ export default function FilePreviewModal({
     const [isEditingName, setIsEditingName] = useState(false);
     const [nameDraft, setNameDraft] = useState(name);
     const [renameInFlight, setRenameInFlight] = useState(false);
+    // Synchronous mirror of `renameInFlight` — `setState` lags one render,
+    // so a synchronous double-fire (Enter then immediate blur) can both
+    // observe `renameInFlight === false` and trigger duplicate commits.
+    // The ref flips imperatively at the top of the commit body, blocking
+    // the second call.
+    const renameInFlightRef = useRef(false);
     useEffect(() => {
         if (!isEditingName) setNameDraft(name);
     }, [name, isEditingName]);
@@ -537,6 +562,13 @@ export default function FilePreviewModal({
     // the filename as a static span.
     useEffect(() => {
         handleRenameCommitRef.current = async (next: string) => {
+            // Synchronous in-flight guard: Enter on the input followed
+            // immediately by blur (focus shift, click outside) can both
+            // fire `onCommit` before React has re-rendered with
+            // `renameInFlight=true`. The ref flip is imperative and
+            // observable on the same tick, blocking the second call.
+            if (renameInFlightRef.current) return;
+
             const trimmed = next.trim();
             if (!trimmed || trimmed === name) {
                 setIsEditingName(false);
@@ -552,6 +584,7 @@ export default function FilePreviewModal({
             // the user's last keystrokes on the wrong file. `handleManualFlush`
             // kicks the save (no return value); `inFlightPromiseRef` lets us
             // await its completion before triggering rename.
+            renameInFlightRef.current = true;
             setRenameInFlight(true);
             try {
                 if (isDirectEdit && editContentRef.current !== savedContentRef.current) {
@@ -580,6 +613,7 @@ export default function FilePreviewModal({
                     toastRef.current.error(err instanceof Error ? err.message : '重命名失败');
                 }
             } finally {
+                renameInFlightRef.current = false;
                 if (isMountedRef.current) setRenameInFlight(false);
             }
         };

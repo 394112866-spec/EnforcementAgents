@@ -285,8 +285,16 @@ export default function SessionHistoryDropdown({
         setStatsSession({ id: session.id, title: session.title });
     };
 
+    // Per-session in-flight guard — rapid double-click on the same star
+    // would otherwise fire two PATCHes whose responses can arrive out of
+    // order, leaving the optimistic UI and the disk disagreeing on the
+    // final state (Codex round-4).
+    const favoriteInFlightRef = useRef<Set<string>>(new Set());
+
     const handleToggleFavorite = useCallback(async (e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
+        if (favoriteInFlightRef.current.has(session.id)) return;
+        favoriteInFlightRef.current.add(session.id);
         const next = !session.favorite;
         // Optimistic update: flip the in-memory copy first so the star icon
         // reacts instantly. On failure we revert + toast — better than an
@@ -295,13 +303,18 @@ export default function SessionHistoryDropdown({
         try {
             const result = await updateSession(session.id, { favorite: next });
             if (!result) {
-                throw new Error('updateSession returned null');
+                // updateSession returns null on caught error; revert + toast
+                // (no synthetic throw — it just gets caught by the same
+                // handler below for no UX gain, per Codex review).
+                setSessions(prev => prev?.map(s => s.id === session.id ? { ...s, favorite: !next } : s) ?? prev);
+                toast.error('收藏失败，请重试');
             }
         } catch (err) {
             console.error('[SessionHistoryDropdown] Toggle favorite failed:', err);
-            // Revert optimistic update.
             setSessions(prev => prev?.map(s => s.id === session.id ? { ...s, favorite: !next } : s) ?? prev);
             toast.error('收藏失败，请重试');
+        } finally {
+            favoriteInFlightRef.current.delete(session.id);
         }
     }, [toast]);
 

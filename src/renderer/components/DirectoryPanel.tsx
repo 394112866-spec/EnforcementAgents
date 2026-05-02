@@ -671,9 +671,31 @@ const DirectoryPanel = memo(
       selectedPaths,
     });
 
+    // Pending-selection paths — used by 「新建笔记」 to keep the synthetic
+    // newly-created file selected through the brief window between
+    // `setSelectedNodes` and the watcher-driven tree refresh that surfaces
+    // the file in `nodeMetaByPath`. Without this guard, the reconciliation
+    // below would prune the synthetic node before the refresh resolves
+    // (Codex round-4 caught). Pending paths auto-evict after 5 s — if the
+    // file truly never materialises (deleted externally mid-creation), we
+    // fall back to the normal filter behaviour.
+    const pendingSelectionPathsRef = useRef<Set<string>>(new Set());
+    const markPendingSelection = useCallback((path: string) => {
+      pendingSelectionPathsRef.current.add(path);
+      setTimeout(() => pendingSelectionPathsRef.current.delete(path), 5000);
+    }, []);
+
     useEffect(() => {
       setSelectedNodes((prev) => {
-        const next = prev.filter((node) => nodeMetaByPath.has(node.path));
+        const pending = pendingSelectionPathsRef.current;
+        const next = prev.filter((node) =>
+          nodeMetaByPath.has(node.path) || pending.has(node.path),
+        );
+        // Once a pending path materialises in nodeMetaByPath, drop it from
+        // pending — the real node has taken over.
+        for (const p of Array.from(pending)) {
+          if (nodeMetaByPath.has(p)) pending.delete(p);
+        }
         return next.length === prev.length ? prev : next;
       });
       if (
@@ -1261,30 +1283,51 @@ const DirectoryPanel = memo(
       );
       try {
         const probe = await fileService.checkPaths({ paths: probePaths });
-        const firstFree = candidates.findIndex(
-          (_, i) => !probe.results[probePaths[i]]?.exists,
-        );
-        if (firstFree < 0) {
+        // Race-resilient creation: walk candidates in order, skip those
+        // already known occupied, and on `newFile` "already exists" race
+        // (another caller took the slot between probe and create — Codex
+        // round-4 caught) fall through to the next candidate. In the
+        // common case this is exactly one `newFile` call.
+        let createdPath: string | null = null;
+        let filename: string | null = null;
+        for (let i = 0; i < candidates.length; i++) {
+          if (probe.results[probePaths[i]]?.exists) continue;
+          const candidate = candidates[i];
+          try {
+            const created = await fileService.newFile({
+              parentDir,
+              name: candidate,
+            });
+            createdPath = created.path;
+            filename = candidate;
+            break;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/already exists/i.test(msg)) continue; // race — try next
+            throw e;
+          }
+        }
+        if (!createdPath || !filename) {
           setError("当前分钟内已有过多笔记，请稍后再试");
           return;
         }
-        const filename = candidates[firstFree];
-        const created = await fileService.newFile({
-          parentDir,
-          name: filename,
-        });
+
         // Watcher refresh will surface the new file; we also kick a manual
         // refresh so the highlight + selection are immediate.
         refresh();
 
         // Synthesize a tree-node so selectedNodes highlights the new file
-        // even before the watcher-driven re-fetch resolves.
+        // even before the watcher-driven re-fetch resolves. The pending
+        // selection mark protects this node from the reconciliation
+        // useEffect, which would otherwise filter it out (it isn't yet
+        // in `nodeMetaByPath`).
         const newNode: DirectoryTreeNode = {
-          id: created.path,
+          id: createdPath,
           name: filename,
-          path: created.path,
+          path: createdPath,
           type: "file",
         };
+        markPendingSelection(createdPath);
         setSelectedNodes([newNode]);
 
         // Open preview in edit mode. Split-view (Chat) routes via the
@@ -1293,7 +1336,7 @@ const DirectoryPanel = memo(
           name: filename,
           content: "",
           size: 0,
-          path: created.path,
+          path: createdPath,
         };
         if (onFilePreviewExternal) {
           onFilePreviewExternal(previewFile, { initialEditMode: true });
