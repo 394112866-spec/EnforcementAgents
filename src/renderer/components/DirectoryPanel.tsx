@@ -58,6 +58,7 @@ import { useImagePreview } from "@/context/ImagePreviewContext";
 import { useToast } from "@/components/Toast";
 import { type Provider } from "@/config/types";
 import { isDebugMode } from "@/utils/debug";
+import { listenWithCleanup } from "@/utils/tauriListen";
 import { shortenPathForDisplay } from "@/utils/pathDetection";
 
 import ConfirmDialog from "./ConfirmDialog";
@@ -555,8 +556,7 @@ const DirectoryPanel = memo(
     // workspace share one OS watch.
     useEffect(() => {
       if (!fileService.isAvailable) return;
-      let cancelled = false;
-      let unlisten: (() => void) | null = null;
+      const ac = new AbortController();
       let token: string | null = null;
 
       (async () => {
@@ -564,28 +564,23 @@ const DirectoryPanel = memo(
           // Phase D.5 — single round-trip returns the token (held for stop)
           // and the eventKey (used for the listen subscription).
           const handle = await fileService.watchStart();
-          if (cancelled) {
+          if (ac.signal.aborted) {
             // Race: unmount fired during the await — release immediately.
             await fileService.watchStop({ token: handle.token }).catch(() => {});
             return;
           }
           token = handle.token;
-          const { listen } = await import("@tauri-apps/api/event");
-          if (cancelled) return;
-          unlisten = await listen(`workspace:files-changed:${handle.eventKey}`, () => {
+          await listenWithCleanup(`workspace:files-changed:${handle.eventKey}`, () => {
             // Coarse signal — refresh re-fetches the whole tree (debounced).
             refreshRef.current();
-          });
+          }, ac.signal);
         } catch (err) {
           console.warn("[DirectoryPanel] watch start failed:", err);
         }
       })();
 
       return () => {
-        cancelled = true;
-        if (unlisten) {
-          unlisten();
-        }
+        ac.abort();
         if (token) {
           fileService.watchStop({ token }).catch(() => {});
         }

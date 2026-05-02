@@ -9,6 +9,7 @@ import { getWorkspaceCronTasks, getBackgroundSessions } from '@/api/cronTaskClie
 import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
 import type { SessionTag } from '@/hooks/useTaskCenterData';
@@ -190,43 +191,35 @@ export default function SessionHistoryDropdown({
     // Real-time tag updates: listen for cron/IM/agent status changes while dropdown is open
     useEffect(() => {
         if (!isOpen || !isTauriEnvironment()) return;
+        const ac = new AbortController();
 
-        let mounted = true;
-        const unlisteners: (() => void)[] = [];
-
-        (async () => {
-            const { listen } = await import('@tauri-apps/api/event');
-            if (!mounted) return;
-
-            // Cron task start/stop → refresh cron tasks (affects delete protection)
-            const refreshCron = () => {
-                getWorkspaceCronTasks(agentDir).then(tasks => { if (mounted) setCronTasks(tasks); }).catch(() => {});
-            };
-            const u1 = await listen('cron:task-started', refreshCron);
-            const u2 = await listen('cron:task-stopped', refreshCron);
-            unlisteners.push(u1, u2);
-
-            // Agent status changes → refresh statuses
-            const refreshStatuses = () => {
-                import('@tauri-apps/api/core').then(({ invoke }) => {
-                    invoke<AgentStatusMap>('cmd_all_agents_status')
-                        .then(s => { if (mounted) setAgentStatuses(s); }).catch(() => {});
-                }).catch(() => {});
-            };
-            const u3 = await listen('agent:status-changed', refreshStatuses);
-            unlisteners.push(u3);
-
-            // Background completion → refresh background sessions
-            const u5 = await listen('session:background-complete', () => {
-                getBackgroundSessions().then(ids => { if (mounted) setBackgroundSessionIds(ids); }).catch(() => {});
-            });
-            unlisteners.push(u5);
-        })();
-
-        return () => {
-            mounted = false;
-            unlisteners.forEach(fn => fn());
+        // Cron task start/stop → refresh cron tasks (affects delete protection)
+        const refreshCron = () => {
+            getWorkspaceCronTasks(agentDir)
+                .then(tasks => { if (!ac.signal.aborted) setCronTasks(tasks); })
+                .catch(() => {});
         };
+        void listenWithCleanup('cron:task-started', refreshCron, ac.signal);
+        void listenWithCleanup('cron:task-stopped', refreshCron, ac.signal);
+
+        // Agent status changes → refresh statuses
+        const refreshStatuses = () => {
+            import('@tauri-apps/api/core').then(({ invoke }) => {
+                invoke<AgentStatusMap>('cmd_all_agents_status')
+                    .then(s => { if (!ac.signal.aborted) setAgentStatuses(s); })
+                    .catch(() => {});
+            }).catch(() => {});
+        };
+        void listenWithCleanup('agent:status-changed', refreshStatuses, ac.signal);
+
+        // Background completion → refresh background sessions
+        void listenWithCleanup('session:background-complete', () => {
+            getBackgroundSessions()
+                .then(ids => { if (!ac.signal.aborted) setBackgroundSessionIds(ids); })
+                .catch(() => {});
+        }, ac.signal);
+
+        return () => ac.abort();
     }, [isOpen, agentDir]);
 
     // Outside-click + Escape dismissal are owned by the Popover primitive.

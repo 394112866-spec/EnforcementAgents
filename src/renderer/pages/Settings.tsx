@@ -3,7 +3,7 @@ import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import { homeDir, join } from '@tauri-apps/api/path';
 
 import { track } from '@/analytics';
@@ -232,15 +232,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
     useEffect(() => {
         if (!isTauriEnvironment()) return;
-        let cancelled = false;
-        const promise = listen<{ percent: number | null }>('updater:download-progress', (event) => {
-            if (!cancelled) setDownloadProgress(event.payload.percent);
-        });
-        return () => {
-            cancelled = true;
-            // If listen() already resolved, call the unlisten function; if still pending, clean up on resolve
-            void promise.then(unlisten => unlisten());
-        };
+        const ac = new AbortController();
+        void listenWithCleanup<{ percent: number | null }>('updater:download-progress', (event) => {
+            setDownloadProgress(event.payload.percent);
+        }, ac.signal);
+        return () => ac.abort();
     }, []);
     // Reset progress when download completes (updateReady becomes true)
     useEffect(() => {
@@ -386,26 +382,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // Listen for Rust logs (Tauri only)
     useEffect(() => {
         if (!isTauriEnvironment()) return;
-
-        let isMounted = true;
-        let unlisten: (() => void) | null = null;
-
-        (async () => {
-            const { listen } = await import('@tauri-apps/api/event');
-            // 防止组件卸载后设置监听器（竞态条件）
-            if (!isMounted) return;
-            unlisten = await listen<LogEntry>('log:rust', (event) => {
-                setSseLogs(prev => {
-                    const next = [...prev, event.payload];
-                    return next.length > MAX_LOGS ? next.slice(-MAX_LOGS) : next;
-                });
+        const ac = new AbortController();
+        void listenWithCleanup<LogEntry>('log:rust', (event) => {
+            setSseLogs(prev => {
+                const next = [...prev, event.payload];
+                return next.length > MAX_LOGS ? next.slice(-MAX_LOGS) : next;
             });
-        })();
-
-        return () => {
-            isMounted = false;
-            if (unlisten) unlisten();
-        };
+        }, ac.signal);
+        return () => ac.abort();
     }, []);
 
     const clearLogs = useCallback(() => {

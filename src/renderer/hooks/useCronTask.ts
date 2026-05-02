@@ -17,6 +17,7 @@ import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { createSyncStateRef } from '@/utils/syncStateRef';
+import { listenWithCleanup } from '@/utils/tauriListen';
 
 export interface CronTaskState {
   /** Whether cron mode is enabled (before task is created) */
@@ -578,48 +579,42 @@ export function useCronTask(options: UseCronTaskOptions) {
   // to re-subscribe when tabId or other dependencies change
   useEffect(() => {
     if (!isTauriEnvironment()) return;
+    const ac = new AbortController();
 
-    let unlistenTrigger: (() => void) | null = null;
-    let unlistenComplete: (() => void) | null = null;
-    let unlistenError: (() => void) | null = null;
-    let unlistenSchedulerStarted: (() => void) | null = null;
-    let unlistenExecutionStarting: (() => void) | null = null;
-    let unlistenDebug: (() => void) | null = null;
-
-    const setupListeners = async () => {
-      const { listen } = await import('@tauri-apps/api/event');
-
+    // Promise.all the registrations so `listenersReadyRef.current = true`
+    // only flips ON after every Tauri-side registration is genuinely
+    // complete. Before this fix, ready was set immediately after the sync
+    // void-prefixed calls — i.e. before any registration had resolved —
+    // which produced a false "ready" window where downstream consumers
+    // could poll the flag and act on it before the Tauri handlers were
+    // actually attached. (Codex review WARN-3 of the migration.)
+    Promise.all([
       // Scheduler started event (for debugging)
-      unlistenSchedulerStarted = await listen<{ taskId: string; intervalMinutes: number; executionCount: number }>(
+      listenWithCleanup<{ taskId: string; intervalMinutes: number; executionCount: number }>(
         'cron:scheduler-started',
-        (event) => {
-          handleSchedulerStartedRef.current?.(event.payload);
-        }
-      );
-
+        (event) => { handleSchedulerStartedRef.current?.(event.payload); },
+        ac.signal,
+      ),
       // Execution starting event (for debugging)
-      unlistenExecutionStarting = await listen<{ taskId: string; executionNumber: number; isFirstExecution: boolean }>(
+      listenWithCleanup<{ taskId: string; executionNumber: number; isFirstExecution: boolean }>(
         'cron:execution-starting',
-        (event) => {
-          handleExecutionStartingRef.current?.(event.payload);
-        }
-      );
-
+        (event) => { handleExecutionStartingRef.current?.(event.payload); },
+        ac.signal,
+      ),
       // Debug events from Rust
-      unlistenDebug = await listen<{ taskId: string; message: string; error?: boolean }>(
+      listenWithCleanup<{ taskId: string; message: string; error?: boolean }>(
         'cron:debug',
-        (event) => {
-          handleDebugEventRef.current?.(event.payload);
-        }
-      );
-
+        (event) => { handleDebugEventRef.current?.(event.payload); },
+        ac.signal,
+      ),
       // Legacy: trigger from Rust to frontend to execute
-      unlistenTrigger = await listen<CronTaskTriggerPayload>('cron:trigger-execution', (event) => {
-        handleSchedulerTriggerRef.current?.(event.payload);
-      });
-
+      listenWithCleanup<CronTaskTriggerPayload>(
+        'cron:trigger-execution',
+        (event) => { handleSchedulerTriggerRef.current?.(event.payload); },
+        ac.signal,
+      ),
       // New: Rust executed directly, notify frontend to update UI
-      unlistenComplete = await listen<{ taskId: string; success: boolean; executionCount: number }>(
+      listenWithCleanup<{ taskId: string; success: boolean; executionCount: number }>(
         'cron:execution-complete',
         (event) => {
           if (handleExecutionCompleteRef.current) {
@@ -627,33 +622,26 @@ export function useCronTask(options: UseCronTaskOptions) {
           } else if (isDebugMode()) {
             console.warn('[useCronTask] cron:execution-complete handler not ready');
           }
-        }
-      );
-
-      unlistenError = await listen<{ taskId: string; error: string }>(
+        },
+        ac.signal,
+      ),
+      listenWithCleanup<{ taskId: string; error: string }>(
         'cron:execution-error',
-        (event) => {
-          handleExecutionErrorRef.current?.(event.payload);
-        }
-      );
-
+        (event) => { handleExecutionErrorRef.current?.(event.payload); },
+        ac.signal,
+      ),
+    ]).then(() => {
+      if (ac.signal.aborted) return;
       listenersReadyRef.current = true;
       if (isDebugMode()) {
         console.log('[useCronTask] Tauri event listeners ready');
       }
-    };
-
-    setupListeners();
+    });
 
     return () => {
       mountedRef.current = false;
       listenersReadyRef.current = false;
-      if (unlistenSchedulerStarted) unlistenSchedulerStarted();
-      if (unlistenExecutionStarting) unlistenExecutionStarting();
-      if (unlistenDebug) unlistenDebug();
-      if (unlistenTrigger) unlistenTrigger();
-      if (unlistenComplete) unlistenComplete();
-      if (unlistenError) unlistenError();
+      ac.abort();
     };
   }, []);
 
