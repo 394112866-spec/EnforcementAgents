@@ -1,29 +1,31 @@
 /**
  * WorkspaceSelector - Dropdown workspace selector for Launcher brand section.
  *
- * Layout (post-PRD-0.2.7 polish):
- *   ┌─ Agent 工作区 ──────────────────┐  ← header
- *   │ ⚡ mino       [默认]               │  ← default workspace, pinned first
- *   │   ~/Documents/.../mino             │
- *   │ 📦 zao_translate          [设为默认]│  ← hover-only button on right
- *   │   ~/Documents/.../zao_translate    │
- *   │ ...                                 │
- *   ├─────────────────────────────────────┤
- *   │ ➕ 选择文件夹...                    │
- *   └─────────────────────────────────────┘
+ * Layout (post-PRD-0.2.7 layout polish):
+ *   ┌─ Agent 工作区 ─────────────────────────────────┐
+ *   │ [icon] mino [默认]                  [设为默认] │  ← line 1
+ *   │        ~/Documents/.../mino                    │  ← line 2 (full width)
+ *   │ [icon] zao_translate                [设为默认] │
+ *   │        ~/Documents/.../zao_translate           │
+ *   └────────────────────────────────────────────────┘
  *
- * Sort: default first → others by lastOpened desc. List shows ALL projects
- * (no count cap) so it visually mirrors the right-side workspace grid.
+ * Sort: default first → others by lastOpened desc. Single-action
+ * `选择文件夹` row was removed — workspace creation lives in Settings now,
+ * keeping this dropdown focused on selection.
  *
  * "设为默认" semantics: clicking it writes `defaultWorkspacePath` via the
  * existing config service (same code path Settings → 通用设置 → 默认工作区
  * uses), the list re-orders so the new default lands on top, and the
  * dropdown stays open — the user can compare/keep browsing right after.
- * Clicking the row body (anywhere except the button) selects + closes,
- * unchanged from prior behavior.
+ * Clicking the row body (anywhere except the button) selects + closes.
+ *
+ * Markup uses a `role="button"` div wrapper for the row so the real
+ * `<button>` inside ("设为默认") doesn't violate the no-button-in-button
+ * HTML rule. Both surfaces remain keyboard-reachable (Tab to row, Space /
+ * Enter to select; Shift+Tab to inner button when revealed).
  */
 
-import { ChevronUp, Plus, Star } from 'lucide-react';
+import { ChevronUp, Plus } from 'lucide-react';
 import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { Popover } from '@/components/ui/Popover';
@@ -135,21 +137,6 @@ export default function WorkspaceSelector({
                         );
                     })}
                 </div>
-
-                {/* Divider + add folder — outside the scroll region so it stays
-                 *  pinned to the bottom even with many projects. */}
-                <div className="border-t border-[var(--line)]">
-                    <button
-                        onClick={() => {
-                            setIsOpen(false);
-                            onAddFolder();
-                        }}
-                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                        <Plus className="h-3.5 w-3.5" />
-                        <span>选择文件夹...</span>
-                    </button>
-                </div>
             </Popover>
         </>
     );
@@ -166,17 +153,20 @@ interface WorkspaceRowProps {
     onSetDefault?: (p: Project) => void;
 }
 
-/** Single row: icon + name (+ default tag) + path; hover shows
- *  "设为默认" button on the right at a fixed slot.
+/** Single row, two-line layout:
  *
- *  Structure: outer wrapper is `position: relative` + `group`. The row body
- *  is a real `<button>` (full-width, holds icon/name/path so keyboard +
- *  click + screen reader all work). The "设为默认" button is a SIBLING
- *  positioned absolutely on the right — siblings, not nested, since
- *  `<button>` inside `<button>` is invalid HTML. The sibling button's
- *  click handler calls `stopPropagation` so the row's onClick doesn't
- *  also fire, which is what keeps the dropdown open while changing
- *  default. */
+ *    [icon]  name [默认]                          [设为默认]
+ *            ~/full/path/here ───────────────────── ends at panel edge
+ *
+ *  Why the row is a `role="button"` div instead of a real `<button>`:
+ *  the right-side "设为默认" trigger MUST stay a real `<button>` for
+ *  keyboard a11y, and `<button>` inside `<button>` is invalid HTML.
+ *  Wrapping the row as a `role="button"` div with explicit Enter/Space
+ *  handling preserves keyboard reachability for both the row body
+ *  (select) and the inner trigger ("设为默认") without nesting.
+ *
+ *  The path on line 2 spans the full inner width (no spacer for the
+ *  hover trigger — which now sits on line 1, not in the path slot). */
 function WorkspaceRow({
     project,
     isDefault,
@@ -184,89 +174,67 @@ function WorkspaceRow({
     onSelect,
     onSetDefault,
 }: WorkspaceRowProps) {
+    const displayName = project.displayName || getFolderName(project.path);
     return (
         <div
-            // `group` is the hover/focus anchor — only used for the action
-            // button's reveal. The row body has its own `hover:bg-*` because
-            // it's the parent <button>'s normal :hover state; using `group`
-            // here would be redundant.
-            className="group relative"
+            role="button"
+            tabIndex={0}
+            onClick={() => onSelect(project)}
+            onKeyDown={(e) => {
+                // Enter / Space activate the row body. We deliberately don't
+                // include the inner trigger — Tab moves into it on its own.
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSelect(project);
+                }
+            }}
+            className={`group flex cursor-pointer items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
+                isSelected
+                    ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
+                    : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+            }`}
         >
-            <button
-                type="button"
-                onClick={() => onSelect(project)}
-                className={`flex w-full items-start gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
-                    isSelected
-                        ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
-                        : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
-                }`}
-            >
-                <WorkspaceIcon icon={project.icon} size={16} />
-                {/* `min-w-0` on the outer flex item AND on the inner name
-                 *  flex row — without it on the inner row, flex's default
-                 *  `min-width: auto` (= content width) prevents the name
-                 *  span's `truncate` from working, and a long displayName
-                 *  pushes the [默认] tag out of view (Codex review caught). */}
-                <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                        <span className="min-w-0 flex-1 truncate font-medium">
-                            {project.displayName || getFolderName(project.path)}
+            <WorkspaceIcon icon={project.icon} size={28} />
+            <div className="min-w-0 flex-1">
+                {/* Line 1: name + 默认 tag (right-against-name) + flex spacer
+                 *  + "设为默认" hover trigger pinned to the right. */}
+                <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="min-w-0 truncate font-medium">{displayName}</span>
+                    {isDefault && (
+                        <span className="shrink-0 rounded-full bg-[var(--accent)]/12 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent)]">
+                            默认
                         </span>
-                        {isDefault && (
-                            <span className="shrink-0 rounded-full bg-[var(--accent)]/12 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent)]">
-                                默认
-                            </span>
-                        )}
-                    </div>
-                    <div className="truncate text-[11px] text-[var(--ink-muted)]">
-                        {shortenPathForDisplay(project.path)}
-                    </div>
+                    )}
+                    <div className="flex-1" />
+                    {onSetDefault && (
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                // Stop the click from bubbling to the row's
+                                // onClick — otherwise selecting "设为默认"
+                                // would also select the workspace.
+                                e.stopPropagation();
+                                onSetDefault(project);
+                            }}
+                            // `opacity-0` alone leaves the invisible button
+                            // capturing clicks; combine with
+                            // `pointer-events-none` so the bare row area
+                            // doesn't silently trigger this when the button
+                            // is hidden (Codex review).
+                            className="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-[var(--ink-muted)] opacity-0 pointer-events-none transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] focus-visible:opacity-100 focus-visible:pointer-events-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
+                            aria-label={`设为默认工作区：${displayName}`}
+                            title="设为默认工作区"
+                        >
+                            设为默认
+                        </button>
+                    )}
                 </div>
-                {/* Right-side spacer so name/path don't extend under where the
-                 *  hover button overlays. Width matches the action button's
-                 *  approximate footprint (px-2 + icon + label ≈ 70-80px); a
-                 *  fixed 76px keeps row layout stable whether or not the
-                 *  action button is rendered, so default and non-default rows
-                 *  align horizontally. */}
-                <span aria-hidden className="w-[76px] shrink-0" />
-            </button>
-            {/* "设为默认" — absolute-positioned sibling button (NOT nested
-             *  inside the row button — `<button>` inside `<button>` is
-             *  invalid HTML). Hidden by default, revealed on group-hover OR
-             *  keyboard focus.
-             *
-             *  CRITICAL pointer-events note: `opacity-0` does NOT disable
-             *  pointer events. Without `pointer-events-none`, the invisible
-             *  button still captures clicks in its absolute slot — a user
-             *  clicking the visually blank 76px right area would silently
-             *  trigger "set as default" instead of selecting the row (Codex
-             *  caught this). `group-hover:pointer-events-auto` re-enables
-             *  interaction once the button is visible, which is also the
-             *  only state in which the user could intend to click it.
-             *
-             *  Keyboard a11y: `group-focus-within:opacity-100` +
-             *  `focus-visible:opacity-100` reveals the button when it
-             *  receives keyboard focus — without this, a tab user would
-             *  trigger an unseen control. */}
-            {onSetDefault && (
-                <button
-                    type="button"
-                    onClick={(e) => {
-                        // Sibling, not ancestor, so the row's onClick won't
-                        // see this click anyway. stopPropagation is belt-and-
-                        // suspenders against future restructuring (e.g. if
-                        // the wrapper picks up an onClick handler).
-                        e.stopPropagation();
-                        onSetDefault(project);
-                    }}
-                    className="absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] opacity-0 pointer-events-none transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] focus-visible:opacity-100 focus-visible:pointer-events-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
-                    aria-label={`设为默认工作区：${project.displayName || getFolderName(project.path)}`}
-                    title="设为默认工作区"
-                >
-                    <Star className="h-3 w-3" />
-                    设为默认
-                </button>
-            )}
+                {/* Line 2: path. No right-side spacer — the path is allowed
+                 *  to truncate at the panel's right edge. */}
+                <div className="truncate text-[11px] text-[var(--ink-muted)]">
+                    {shortenPathForDisplay(project.path)}
+                </div>
+            </div>
         </div>
     );
 }
