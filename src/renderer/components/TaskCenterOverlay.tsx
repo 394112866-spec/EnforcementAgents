@@ -21,6 +21,7 @@ import { searchSessions, type SessionSearchHit } from '@/api/searchClient';
 import { TASK_CENTER_FRESHNESS_TTL_MS, type TaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import SessionTagBadge from '@/components/SessionTagBadge';
+import Tip from '@/components/Tip';
 import SessionStatsModal from '@/components/SessionStatsModal';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomSelect from '@/components/CustomSelect';
@@ -412,40 +413,48 @@ export default memo(function TaskCenterOverlay({
                                                     <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
                                                         <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
                                                         <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
-                                                            <button
-                                                                onClick={e => handleToggleFavorite(e, session)}
-                                                                title={session.favorite ? '取消收藏' : '收藏'}
-                                                                className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
-                                                                    session.favorite
-                                                                        ? 'text-[var(--accent)]'
-                                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                                                                }`}
-                                                            >
-                                                                <Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />
-                                                            </button>
-                                                            <button
-                                                                onClick={e => handleShowStats(e, session)}
-                                                                title="查看统计"
-                                                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
-                                                            >
-                                                                <BarChart2 className="h-3.5 w-3.5" />
-                                                            </button>
+                                                            <Tip label={session.favorite ? '取消收藏' : '收藏'} position="bottom">
+                                                                <button
+                                                                    onClick={e => handleToggleFavorite(e, session)}
+                                                                    aria-label={session.favorite ? '取消收藏' : '收藏'}
+                                                                    className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
+                                                                        session.favorite
+                                                                            ? 'text-[var(--accent)]'
+                                                                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                                    }`}
+                                                                >
+                                                                    <Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />
+                                                                </button>
+                                                            </Tip>
+                                                            <Tip label="查看统计" position="bottom">
+                                                                <button
+                                                                    onClick={e => handleShowStats(e, session)}
+                                                                    aria-label="查看统计"
+                                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
+                                                                >
+                                                                    <BarChart2 className="h-3.5 w-3.5" />
+                                                                </button>
+                                                            </Tip>
                                                             {isCronProtected ? (
-                                                                <button
-                                                                    disabled
-                                                                    title="请先停止定时任务后再删除"
-                                                                    className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
-                                                                >
-                                                                    <Trash2 className="h-3.5 w-3.5" />
-                                                                </button>
+                                                                <Tip label="请先停止定时任务后再删除" position="bottom">
+                                                                    <button
+                                                                        disabled
+                                                                        aria-label="删除（请先停止定时任务）"
+                                                                        className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
+                                                                    >
+                                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                                    </button>
+                                                                </Tip>
                                                             ) : (
-                                                                <button
-                                                                    onClick={e => handleDeleteClick(e, session)}
-                                                                    title="删除"
-                                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
-                                                                >
-                                                                    <Trash2 className="h-3.5 w-3.5" />
-                                                                </button>
+                                                                <Tip label="删除" position="bottom">
+                                                                    <button
+                                                                        onClick={e => handleDeleteClick(e, session)}
+                                                                        aria-label="删除"
+                                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
+                                                                    >
+                                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                                    </button>
+                                                                </Tip>
                                                             )}
                                                         </div>
                                                     </div>
