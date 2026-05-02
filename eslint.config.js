@@ -54,7 +54,45 @@ export default defineConfig(
       ...react.configs.recommended.rules,
       ...react.configs['jsx-runtime'].rules,
       ...reactHooks.configs.recommended.rules,
-      'react/prop-types': 'off' // Using TypeScript for prop validation
+      'react/prop-types': 'off', // Using TypeScript for prop validation
+      // Phase E (PRD 0.2.7): the renderer MUST NOT reach the deleted
+      // sidecar workspace-IO endpoints. Workspace file ops go through Rust
+      // `cmd_workspace_*` invokes via `useWorkspaceFileService`. Each
+      // banned endpoint is matched via a `Literal[value=...]` selector
+      // (esquery's regex literals are flaky in flat-config mode, so we
+      // enumerate). Comments aren't `Literal` nodes, so red-line history
+      // can still reference these strings in CLAUDE.md / PRD docs.
+      'no-restricted-syntax': [
+        'error',
+        ...[
+          '/api/files/import-base64',
+          '/api/files/copy',
+          '/api/files/read-as-base64',
+          '/api/files/add-gitignore',
+          '/api/commands',
+          '/api/git/branch',
+          '/api/claude-md',
+          '/agent/dir',
+          '/agent/dir/expand',
+          '/agent/file',
+          '/agent/download',
+          '/agent/import',
+          '/agent/new-file',
+          '/agent/new-folder',
+          '/agent/rename',
+          '/agent/delete',
+          '/agent/move',
+          '/agent/open-in-finder',
+          '/agent/open-with-default',
+          '/agent/open-path',
+          '/agent/search-files',
+          '/agent/check-paths',
+          '/agent/save-file'
+        ].map((endpoint) => ({
+          selector: `Literal[value=${JSON.stringify(endpoint)}]`,
+          message: `Phase E (PRD 0.2.7): sidecar HTTP endpoint '${endpoint}' was deleted. Workspace file IO must go through Rust cmd_workspace_* invokes via useWorkspaceFileService. See CLAUDE.md red-line.`
+        }))
+      ]
     }
   },
   // Global rules for all files

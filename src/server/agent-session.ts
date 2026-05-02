@@ -23,7 +23,10 @@ import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
 // Cheap: just function-ref storage, no SDK/zod eval, no tool module loaded.
 import './tools/builtin-mcp-meta';
 import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils/socks-bridge';
-import { startFileWatcher } from './file-watcher';
+// Phase E (PRD 0.2.7): the sidecar file watcher (`file-watcher.ts` →
+// SSE `workspace:files-changed`) is removed. The renderer subscribes to
+// the Rust workspace_files watcher (Tauri event
+// `workspace:files-changed:<eventKey>`) instead.
 import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
 // gemini-image / edge-tts / generative-ui registered in builtin-mcp-meta.ts.
@@ -4940,10 +4943,8 @@ export async function initializeAgent(
   initLogger(sessionId);
   console.log(`[agent] init dir=${agentDir} initialPrompt=${hasInitialPrompt ? 'yes' : 'no'} sessionId=${sessionId} resume=${sessionRegistered}`);
 
-  // Start file watcher for workspace directory changes → SSE push to frontend.
-  // Watcher is workspace-scoped (survives session restarts). startFileWatcher()
-  // deduplicates if already watching the same path.
-  startFileWatcher(agentDir);
+  // Phase E (PRD 0.2.7): file-watcher → SSE removed; renderer uses the Rust
+  // workspace_files watcher via Tauri events (`workspace:files-changed:*`).
 
   // Self-resolve workspace config from disk (MCP/provider/model).
   // Eliminates dependency on pre-serialized snapshots (providerEnvJson, mcpServersJson)
