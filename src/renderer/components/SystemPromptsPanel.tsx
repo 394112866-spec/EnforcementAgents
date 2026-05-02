@@ -147,17 +147,14 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                 if (file.type === 'claude-md') {
                     // Phase E (PRD 0.2.7): CLAUDE.md read goes through Rust
                     // workspace_files (`cmd_workspace_read_claude_md`) instead
-                    // of sidecar `/api/claude-md`. Hook handles "exists:false"
-                    // as `content: ''`, matching the legacy shape.
+                    // of sidecar `/api/claude-md`. The Rust cmd resolves with
+                    // `{ exists, path, content }` (or rejects on real error);
+                    // missing file → `exists: false, content: ''`.
                     const res = await fileServiceRef.current.readClaudeMd();
                     if (!isMountedRef.current || requestId !== loadRequestIdRef.current) return;
-                    if (res.success) {
-                        setContent(res.content);
-                        setEditContent(res.content);
-                        setExists(res.exists);
-                    } else {
-                        setError('Failed to load CLAUDE.md');
-                    }
+                    setContent(res.content);
+                    setEditContent(res.content);
+                    setExists(res.exists);
                 } else {
                     const endpoint = buildEndpoint(`/api/rules/${encodeURIComponent(file.filename)}`);
                     const res = await api.get<RuleContentResponse>(endpoint);

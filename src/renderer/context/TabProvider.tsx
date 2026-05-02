@@ -2080,13 +2080,10 @@ export default function TabProvider({
                 break;
             }
 
-            case 'workspace:files-changed': {
-                // File watcher detected workspace file changes — trigger directory tree refresh.
-                // This is the authoritative catch-all: covers sub-agent tools, external editors,
-                // terminal operations, and any other source of filesystem change.
-                setToolCompleteCount(c => c + 1);
-                break;
-            }
+            // (Phase E PRD 0.2.7: `workspace:files-changed` SSE handler
+            // removed. The Rust workspace_files watcher emits a Tauri event
+            // — `workspace:files-changed:<eventKey>` — that DirectoryPanel
+            // subscribes to directly.)
 
             default: {
                 // Log unhandled events for debugging

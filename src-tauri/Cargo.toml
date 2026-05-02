@@ -89,6 +89,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
 ] }
+# `junction` creates NTFS directory junctions without admin / Developer Mode
+# (`std::os::windows::fs::symlink_dir` would otherwise need ERROR_PRIVILEGE_NOT_HELD
+# elevated rights). Used by `workspace_files::skill_sync` to mirror
+# user-level skills into `<workspace>/.claude/skills/` — the Node.js
+# sidecar uses `symlinkSync(target, link, 'junction')` for the same reason.
+junction = "1.0"
 
 [dev-dependencies]
 tempfile = "3.10"

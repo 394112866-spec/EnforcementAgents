@@ -22,10 +22,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::path_safety::validate_external_read_path;
+use super::platform_blocks::is_skill_blocked_on_platform;
 use super::skill_sync::sync_workspace_skills;
+use super::skills_config::read_disabled_list;
 
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("compact", "压缩对话历史，释放上下文空间"),
@@ -37,19 +39,6 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("review", "对代码进行审查"),
     ("security-review", "进行安全相关的代码审查"),
 ];
-
-/// Skills that are blocked on certain platforms due to upstream bugs.
-/// Mirrors `src/server/utils/platform.ts::PLATFORM_BLOCKED_SKILLS`.
-fn is_skill_blocked_on_platform(folder: &str) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        if folder == "agent-browser" {
-            return true;
-        }
-    }
-    let _ = folder;
-    false
-}
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -81,12 +70,6 @@ pub struct SlashCommandsResponse {
     /// shadowed by a project-level skill — used by the frontend to know which
     /// global skills are still "active" after dedup.
     pub global_skill_folder_names: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct SkillsConfig {
-    #[serde(default)]
-    disabled: Vec<String>,
 }
 
 #[tauri::command]
@@ -125,7 +108,7 @@ pub async fn cmd_list_slash_commands(
     let home_dir = dirs::home_dir().ok_or_else(|| "home dir unavailable".to_string())?;
     let myagents_root = home_dir.join(".myagents");
 
-    let skills_config = read_skills_config(&myagents_root);
+    let disabled = read_disabled_list(&myagents_root);
 
     let mut commands: Vec<SlashCommand> = Vec::new();
 
@@ -144,7 +127,7 @@ pub async fn cmd_list_slash_commands(
         scan_skills_dir(
             &workspace_root.join(".claude").join("skills"),
             "project",
-            &skills_config,
+            &disabled,
             &mut commands,
         );
     }
@@ -152,7 +135,7 @@ pub async fn cmd_list_slash_commands(
     scan_skills_dir(
         &myagents_root.join("skills"),
         "user",
-        &skills_config,
+        &disabled,
         &mut commands,
     );
 
@@ -195,22 +178,6 @@ pub async fn cmd_list_slash_commands(
     })
 }
 
-fn read_skills_config(myagents_root: &Path) -> SkillsConfig {
-    // Cross-review caught: the sidecar canonical path is
-    // `~/.myagents/skills-config.json` (NOT `~/.myagents/skills/.config.json`,
-    // which the previous version wrongly read — file never exists, so
-    // `disabled` always defaulted to empty). Match the sidecar path so user
-    // disable toggles in Settings actually take effect in the slash menu.
-    let path = myagents_root.join("skills-config.json");
-    if !path.is_file() {
-        return SkillsConfig::default();
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => SkillsConfig::default(),
-    }
-}
-
 fn scan_commands_dir(dir: &Path, scope: &str, out: &mut Vec<SlashCommand>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -251,7 +218,7 @@ fn scan_commands_dir(dir: &Path, scope: &str, out: &mut Vec<SlashCommand>) {
 fn scan_skills_dir(
     dir: &Path,
     scope: &str,
-    skills_config: &SkillsConfig,
+    disabled: &[String],
     out: &mut Vec<SlashCommand>,
 ) {
     let entries = match std::fs::read_dir(dir) {
@@ -282,7 +249,7 @@ fn scan_skills_dir(
         if is_skill_blocked_on_platform(&folder_name) {
             continue;
         }
-        if scope == "user" && skills_config.disabled.iter().any(|d| d == &folder_name) {
+        if scope == "user" && disabled.iter().any(|d| d == &folder_name) {
             continue;
         }
 

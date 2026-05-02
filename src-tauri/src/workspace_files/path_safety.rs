@@ -33,7 +33,9 @@
 //! `fs::canonicalize` fails on paths that don't exist yet.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::commands::validate_file_path as system_blacklist_check;
 
@@ -196,6 +198,53 @@ fn is_windows_reserved_name(name: &str) -> bool {
             | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
             | "LPT6" | "LPT7" | "LPT8" | "LPT9"
     )
+}
+
+/// Atomically write `bytes` to `target`. Writes a same-directory temp file
+/// first, then `fs::rename`s it onto the target — `rename` is atomic on
+/// POSIX (and Windows handles the dir-local case correctly). The temp name
+/// is unique per process via a monotonic counter; `pid + counter` is enough
+/// for the only realistic concurrency (one save modal per tab; AI CLAUDE.md
+/// edits are sequential).
+///
+/// The target's parent must already exist (callers are responsible for
+/// `create_dir_all` if their UX needs implicit-dir-create — `save_file.rs`
+/// requires the file to exist anyway, so its parent does too).
+pub fn atomic_write_file(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Cannot determine parent directory".to_string())?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| "Cannot determine filename".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(
+        ".{}.myagents-{}-{}.tmp",
+        file_name,
+        std::process::id(),
+        n
+    );
+    let tmp_path = parent.join(&tmp_name);
+
+    {
+        let mut tmp_file = fs::File::create(&tmp_path)
+            .map_err(|e| format!("Failed to create tmp file: {}", e))?;
+        tmp_file
+            .write_all(bytes)
+            .map_err(|e| format!("Failed to write tmp file: {}", e))?;
+        // Drop the file handle before rename — Windows requires this.
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, target) {
+        // Best-effort cleanup so a failed rename doesn't leak a tmp file.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Failed to commit write: {}", e));
+    }
+    Ok(())
 }
 
 /// Sanitize a filename for filesystem write — strips Windows-illegal chars by

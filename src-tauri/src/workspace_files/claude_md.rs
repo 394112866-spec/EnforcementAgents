@@ -5,40 +5,41 @@
 //! prompt addendum). Path is fixed per workspace — `<workspace>/CLAUDE.md` —
 //! so there's no path-traversal surface on the input side.
 //!
-//! - Read returns `{ exists, path, content }` to mirror the sidecar shape;
-//!   "not exists" is NOT an error (Settings UI shows an empty editor).
+//! - Read returns `{ exists, path, content }` (mirrors sidecar shape so the
+//!   Settings UI is a 1:1 swap). "not exists" is NOT an error — the editor
+//!   just opens empty.
 //! - Write creates the file if missing (CLAUDE.md is often "created on
 //!   first edit" — no separate "create" affordance in UI).
-//! - Atomic write via tmp + rename, same pattern as `save_file.rs`.
+//! - Bounded read (1MB cap) + atomic write — both routed through
+//!   `path_safety` helpers, so symlink-escape and TOCTOU defenses match
+//!   `read_preview` / `save_file` exactly.
+//!
+//! Trade-off: no file lock around write. Multi-tab Settings edit produces
+//! last-writer-wins. Workspace-level config + single-user app makes the race
+//! window tiny; if it bites, swap to `with_file_lock_blocking`.
 
 use std::fs;
-use std::io::Write;
 
 use serde::Serialize;
 
-use super::path_safety::validate_workspace_root;
+use super::path_safety::{
+    atomic_write_file, resolve_existing_inside_workspace, resolve_inside_workspace,
+    validate_workspace_root,
+};
 
 const CLAUDE_MD_FILENAME: &str = "CLAUDE.md";
 
-/// Hard cap on CLAUDE.md size — sidecar had no explicit cap (`writeFileSync`
-/// would just OOM on huge inputs); we add one to match the rest of the
-/// workspace_files surface. 1MB is well above any practical CLAUDE.md.
-const MAX_CONTENT_BYTES: usize = 1024 * 1024;
+/// Hard cap on CLAUDE.md size — both read and write — so a malformed /
+/// truncated-to-4GB file can't OOM the Tauri runtime. 1MB is well above any
+/// practical CLAUDE.md.
+const MAX_CONTENT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadClaudeMdResult {
-    pub success: bool,
     pub exists: bool,
     pub path: String,
     pub content: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteClaudeMdResult {
-    pub success: bool,
-    pub path: String,
 }
 
 #[tauri::command]
@@ -46,103 +47,83 @@ pub async fn cmd_workspace_read_claude_md(
     workspace: String,
 ) -> Result<ReadClaudeMdResult, String> {
     let workspace_root = validate_workspace_root(&workspace)?;
-    let claude_md = workspace_root.join(CLAUDE_MD_FILENAME);
-    let path_str = claude_md.to_string_lossy().to_string();
+    let path_str = workspace_root.join(CLAUDE_MD_FILENAME).to_string_lossy().to_string();
 
-    // Use symlink_metadata first to avoid following a malicious link out of
-    // the workspace. CLAUDE.md is fixed-name and at workspace root, but a
-    // user could (legitimately) symlink it; if that link goes outside, fail
-    // the same way the read-side gate does — `not found` is uniform UX.
-    let meta = match fs::symlink_metadata(&claude_md) {
-        Ok(m) => m,
-        Err(_) => {
+    // resolve_existing_inside_workspace canonicalizes the path AND verifies
+    // it's inside the canonical workspace root. Three outcomes:
+    // - Ok(canonical) → file exists, path is safe to read
+    // - Err("File not found") → return exists:false (UI shows empty editor)
+    // - Err(other) → propagate (e.g. "Path escapes workspace root via symlink"
+    //   for a malicious CLAUDE.md → outside-workspace symlink)
+    let resolved = match resolve_existing_inside_workspace(&workspace_root, CLAUDE_MD_FILENAME) {
+        Ok(p) => p,
+        Err(e) if e == "File not found" => {
             return Ok(ReadClaudeMdResult {
-                success: true,
                 exists: false,
                 path: path_str,
                 content: String::new(),
             });
         }
+        Err(e) => return Err(e),
     };
-    if meta.is_symlink() {
-        // If the symlink target falls outside the workspace, refuse rather
-        // than leak content — same posture as `read_preview.rs`.
-        let canonical = fs::canonicalize(&claude_md)
-            .map_err(|_| "Symlink target unavailable".to_string())?;
-        let canonical_root = fs::canonicalize(&workspace_root)
-            .map_err(|_| "Workspace root canonicalize failed".to_string())?;
-        if !canonical.starts_with(&canonical_root) {
-            return Err("CLAUDE.md symlink escapes workspace".to_string());
-        }
-    }
-    if !claude_md.is_file() {
-        // Resolved (via symlink follow) to something that isn't a file.
-        return Err("CLAUDE.md is not a regular file".to_string());
-    }
 
-    let content = fs::read_to_string(&claude_md)
-        .map_err(|e| format!("Failed to read CLAUDE.md: {}", e))?;
+    // Bounded read — symmetric with the 1MB write cap. Defends against
+    // attacker-controlled CLAUDE.md ballooning to 4GB → OOM in renderer
+    // (Codex round-3 CRIT-3). Uses `metadata().len()` first to short-circuit
+    // huge files cheaply, then `take(MAX+1)` as TOCTOU defense in case the
+    // file grows between metadata() and read.
+    let metadata = fs::metadata(&resolved).map_err(|_| "File not found".to_string())?;
+    if metadata.len() > MAX_CONTENT_BYTES {
+        return Err("CLAUDE.md too large to read".to_string());
+    }
+    use std::io::Read;
+    let mut file = fs::File::open(&resolved).map_err(|e| format!("Open failed: {}", e))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_CONTENT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Read failed: {}", e))?;
+    if bytes.len() as u64 > MAX_CONTENT_BYTES {
+        return Err("CLAUDE.md too large to read".to_string());
+    }
+    let content = String::from_utf8(bytes)
+        .map_err(|e| format!("CLAUDE.md is not valid UTF-8: {}", e))?;
+
     Ok(ReadClaudeMdResult {
-        success: true,
         exists: true,
         path: path_str,
         content,
     })
 }
 
+/// Write — creates if missing. Returns `()` (success signaled by `Result::Ok`).
 #[tauri::command]
 pub async fn cmd_workspace_write_claude_md(
     workspace: String,
     content: String,
-) -> Result<WriteClaudeMdResult, String> {
-    if content.len() > MAX_CONTENT_BYTES {
+) -> Result<(), String> {
+    if content.len() as u64 > MAX_CONTENT_BYTES {
         return Err("Content too large".to_string());
     }
     let workspace_root = validate_workspace_root(&workspace)?;
-    let claude_md = workspace_root.join(CLAUDE_MD_FILENAME);
 
-    // If CLAUDE.md exists as a symlink escaping the workspace, refuse to
-    // write — symmetric with the read-side check. This blocks an
-    // `evil_link → /etc/sudoers` pre-planted in a malicious repo.
-    if let Ok(meta) = fs::symlink_metadata(&claude_md) {
-        if meta.is_symlink() {
-            let canonical = fs::canonicalize(&claude_md)
-                .map_err(|_| "Symlink target unavailable".to_string())?;
-            let canonical_root = fs::canonicalize(&workspace_root)
-                .map_err(|_| "Workspace root canonicalize failed".to_string())?;
-            if !canonical.starts_with(&canonical_root) {
-                return Err("CLAUDE.md symlink escapes workspace".to_string());
-            }
-        }
+    // If CLAUDE.md exists as a symlink-out-of-workspace, refuse to write
+    // (would corrupt the outside target). For non-existent / regular-file /
+    // safe-symlink cases, fall through to the atomic write.
+    //
+    // Reuse `resolve_existing_inside_workspace`: if it succeeds, the file
+    // exists AND is safely inside the workspace; if it returns
+    // "File not found", the file doesn't exist (we're about to create it,
+    // which is fine — the path is fixed `<root>/CLAUDE.md`, no escape risk);
+    // any other error means the existing file/link escapes — propagate.
+    match resolve_existing_inside_workspace(&workspace_root, CLAUDE_MD_FILENAME) {
+        Ok(_) => { /* exists and inside workspace — safe to overwrite */ }
+        Err(e) if e == "File not found" => { /* doesn't exist — will create */ }
+        Err(e) => return Err(e),
     }
 
-    // Atomic write via tmp + rename. Same pattern as `save_file.rs`.
-    let tmp_name = format!(
-        ".{}.myagents-claude-md-{}-{}.tmp",
-        CLAUDE_MD_FILENAME,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
-    let tmp_path = workspace_root.join(&tmp_name);
-    {
-        let mut tmp_file = fs::File::create(&tmp_path)
-            .map_err(|e| format!("Failed to create tmp file: {}", e))?;
-        tmp_file
-            .write_all(content.as_bytes())
-            .map_err(|e| format!("Failed to write tmp file: {}", e))?;
-    }
-    if let Err(e) = fs::rename(&tmp_path, &claude_md) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(format!("Failed to commit CLAUDE.md write: {}", e));
-    }
-
-    Ok(WriteClaudeMdResult {
-        success: true,
-        path: claude_md.to_string_lossy().to_string(),
-    })
+    let target = resolve_inside_workspace(&workspace_root, CLAUDE_MD_FILENAME)?;
+    atomic_write_file(&target, content.as_bytes())
 }
 
 #[cfg(test)]
@@ -156,7 +137,6 @@ mod tests {
         let res = cmd_workspace_read_claude_md(ws.to_string_lossy().to_string())
             .await
             .unwrap();
-        assert!(res.success);
         assert!(!res.exists);
         assert_eq!(res.content, "");
         let _ = fs::remove_dir_all(&ws);
@@ -175,15 +155,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_rejects_oversize() {
+        let ws = make_test_workspace("claude_md_read_oversize");
+        let big = "a".repeat((MAX_CONTENT_BYTES + 1) as usize);
+        fs::write(ws.join("CLAUDE.md"), &big).unwrap();
+        let res = cmd_workspace_read_claude_md(ws.to_string_lossy().to_string()).await;
+        assert!(res.is_err());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
     async fn write_creates_when_missing() {
         let ws = make_test_workspace("claude_md_write_create");
-        let res = cmd_workspace_write_claude_md(
+        cmd_workspace_write_claude_md(
             ws.to_string_lossy().to_string(),
             "# new\n".to_string(),
         )
         .await
         .unwrap();
-        assert!(res.success);
         assert!(ws.join("CLAUDE.md").is_file());
         assert_eq!(
             fs::read_to_string(ws.join("CLAUDE.md")).unwrap(),
@@ -209,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn write_rejects_oversize() {
         let ws = make_test_workspace("claude_md_write_oversize");
-        let big = "a".repeat(MAX_CONTENT_BYTES + 1);
+        let big = "a".repeat((MAX_CONTENT_BYTES + 1) as usize);
         let res =
             cmd_workspace_write_claude_md(ws.to_string_lossy().to_string(), big).await;
         assert!(res.is_err());

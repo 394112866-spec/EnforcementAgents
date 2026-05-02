@@ -142,20 +142,10 @@ interface CheckPathsResult {
   results: Record<string, PathInfo>;
 }
 
-interface SaveFileResult {
-  success: boolean;
-}
-
 interface ReadClaudeMdResult {
-  success: boolean;
   exists: boolean;
   path: string;
   content: string;
-}
-
-interface WriteClaudeMdResult {
-  success: boolean;
-  path: string;
 }
 
 // Phase D.5 — token-based watcher handle. The renderer holds `token` for the
@@ -256,13 +246,14 @@ export interface WorkspaceFileService {
   readFileAsBlobUrl(args: { path: string }): Promise<BlobUrlHandle>;
   /** [requires workspace] Save edited content back to a workspace file.
    *  The file MUST already exist (no create-on-save). 512KB content cap.
-   *  Atomic via tmp + rename. */
-  saveFile(args: { path: string; content: string }): Promise<SaveFileResult>;
+   *  Atomic via tmp + rename. Resolves on success; rejects on failure. */
+  saveFile(args: { path: string; content: string }): Promise<void>;
   /** [requires workspace] Read `<workspace>/CLAUDE.md`. `exists:false` is
    *  not an error — Settings UI shows an empty editor in that case. */
   readClaudeMd(): Promise<ReadClaudeMdResult>;
-  /** [requires workspace] Write `<workspace>/CLAUDE.md`. Creates if missing. */
-  writeClaudeMd(args: { content: string }): Promise<WriteClaudeMdResult>;
+  /** [requires workspace] Write `<workspace>/CLAUDE.md`. Creates if missing.
+   *  Resolves on success; rejects on failure. */
+  writeClaudeMd(args: { content: string }): Promise<void>;
   /** [requires workspace] */
   gitBranch(): Promise<GitBranchResult>;
   /** [requires workspace] Start the per-workspace fs watcher (ref-counted
@@ -541,7 +532,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
   const saveFile: WorkspaceFileService['saveFile'] = useCallback(
     async ({ path, content }) => {
       const ws = requireWorkspace();
-      return invokeIfTauri<SaveFileResult>('cmd_workspace_save_file', {
+      await invokeIfTauri<void>('cmd_workspace_save_file', {
         workspace: ws,
         path,
         content,
@@ -563,7 +554,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
   const writeClaudeMd: WorkspaceFileService['writeClaudeMd'] = useCallback(
     async ({ content }) => {
       const ws = requireWorkspace();
-      return invokeIfTauri<WriteClaudeMdResult>('cmd_workspace_write_claude_md', {
+      await invokeIfTauri<void>('cmd_workspace_write_claude_md', {
         workspace: ws,
         content,
       });

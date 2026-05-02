@@ -19,60 +19,21 @@
 //!    probe — broken symlinks must register as occupied (CLAUDE.md v0.2.5
 //!    red-line: `Path::exists()` follows symlinks and returns false for
 //!    broken links → caller proceeds into write op → confusing failure).
-//! 4. Windows: we use `symlink_dir` for skills (treats as junction) and
-//!    `symlink_file` for commands. File symlinks on Windows require
-//!    Developer Mode; we log a warning and skip the entry if symlink fails
-//!    rather than abort the whole sync.
+//! 4. Windows: directory links use `junction::create` (NTFS junction — works
+//!    without admin / Developer Mode, mirrors the sidecar's
+//!    `symlinkSync(target, link, 'junction')`). File links use
+//!    `std::os::windows::fs::symlink_file`, which DOES require Developer
+//!    Mode; the sync logs a warning and skips the file if the symlink fails
+//!    rather than abort the whole batch.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
-
 use crate::ulog_warn;
 
-/// Disabled list — read from `~/.myagents/skills-config.json`. Schema
-/// matches sidecar `interface SkillsConfig`. We only care about
-/// `disabled` for sync; `seeded` and `generation` are seeding/optimization
-/// concerns owned by the sidecar.
-#[derive(Debug, Default, Deserialize)]
-struct SkillsConfig {
-    #[serde(default)]
-    disabled: Vec<String>,
-}
-
-fn read_disabled_list(myagents_root: &Path) -> Vec<String> {
-    // Path is `~/.myagents/skills-config.json` (NOT `~/.myagents/skills/.config.json`).
-    // Cross-review caught: `slash.rs` had the wrong path (`skills/.config.json`)
-    // that doesn't exist in practice — it always returned an empty disabled
-    // list. Sync uses the right path; slash.rs needs to be fixed too (separate
-    // task, but match here for correctness).
-    let path = myagents_root.join("skills-config.json");
-    if !path.is_file() {
-        return Vec::new();
-    }
-    match fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str::<SkillsConfig>(&content)
-            .map(|c| c.disabled)
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// Skills that are blocked on certain platforms due to upstream bugs.
-/// Mirrors `src/server/utils/platform.ts::PLATFORM_BLOCKED_SKILLS` and
-/// `slash.rs::is_skill_blocked_on_platform` — kept in sync manually.
-fn is_skill_blocked_on_platform(folder: &str) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        if folder == "agent-browser" {
-            return true;
-        }
-    }
-    let _ = folder;
-    false
-}
+use super::skills_config::read_disabled_list;
+use super::platform_blocks::is_skill_blocked_on_platform;
 
 /// Idempotent: symlink user-level skills + commands into `<workspace>/.claude/`.
 ///
@@ -257,6 +218,15 @@ fn sync_commands_subtree(workspace: &Path, myagents_root: &Path) {
 /// Walk `project_dir` and remove entries that are symlinks pointing into
 /// `user_dir` whose names are NOT in `keep`. Anything outside that narrow
 /// criterion is left alone.
+///
+/// Cross-review (Codex round 3) caught: an earlier version used
+/// `fs::canonicalize(&link)` to resolve the target, but `canonicalize` fails
+/// for broken symlinks (the original sin: user disabled / removed the
+/// `~/.myagents/skills/foo` source → project-side `foo` link is now broken).
+/// That's exactly the case `cleanup_dangling_symlinks` is supposed to handle,
+/// so the canonicalize approach silently skipped every dangling link → they
+/// accumulated forever. Use lexical `read_link` + `path.parent().join(target)`
+/// so broken links resolve to a path we can prefix-check.
 fn cleanup_dangling_symlinks(
     project_dir: &Path,
     user_dir: &Path,
@@ -266,7 +236,6 @@ fn cleanup_dangling_symlinks(
         Ok(e) => e,
         Err(_) => return,
     };
-    let canonical_user = fs::canonicalize(user_dir).ok();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if keep.contains(&name) {
@@ -277,24 +246,46 @@ fn cleanup_dangling_symlinks(
             Ok(m) => m,
             Err(_) => continue,
         };
-        if !meta.is_symlink() {
+        if !meta.is_symlink() && !is_windows_junction(&meta) {
             continue;
         }
-        // Only remove if the link's canonicalized target is inside our
-        // user dir. Avoids touching user-created links that point elsewhere.
-        let target_canonical = match fs::canonicalize(&link) {
-            Ok(c) => c,
+        // Lexical: read the link target without traversing it. Works for
+        // broken/dangling symlinks where canonicalize would fail.
+        let target = match fs::read_link(&link) {
+            Ok(t) => t,
             Err(_) => continue,
         };
-        let inside_user = canonical_user
-            .as_ref()
-            .map(|root| target_canonical.starts_with(root))
-            .unwrap_or(false);
-        if !inside_user {
+        let resolved_target = if target.is_absolute() {
+            target
+        } else {
+            // Relative link target — resolve against the link's own dir.
+            project_dir.join(target)
+        };
+        // Only touch links whose target prefix is our user dir — never
+        // user-installed links that point elsewhere.
+        if !resolved_target.starts_with(user_dir) {
             continue;
         }
         let _ = remove_symlink_or_dir(&link);
     }
+}
+
+/// Windows junctions show up in `symlink_metadata` as a special kind of
+/// reparse point — `is_symlink()` may return `false` for them depending on
+/// the std version. We treat them as "link-like" for cleanup purposes by
+/// also checking via `FileType::is_dir()` + the metadata flag heuristic.
+#[cfg(windows)]
+fn is_windows_junction(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_REPARSE_POINT = 0x400. Combined with `is_dir()` it
+    // identifies a junction (directory reparse point) reliably across
+    // Windows std variants.
+    meta.is_dir() && (meta.file_attributes() & 0x400) != 0
+}
+#[cfg(not(windows))]
+#[inline]
+fn is_windows_junction(_meta: &fs::Metadata) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -302,9 +293,13 @@ fn create_symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
+/// On Windows we use NTFS junctions (no admin / Developer Mode required) —
+/// matches the sidecar's `symlinkSync(target, link, 'junction')`.
+/// `std::os::windows::fs::symlink_dir` would create a true symbolic link,
+/// which requires elevated rights that most users don't have.
 #[cfg(windows)]
 fn create_symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)
+    junction::create(target, link)
 }
 
 #[cfg(unix)]

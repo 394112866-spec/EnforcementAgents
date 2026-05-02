@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use notify_debouncer_full::{
@@ -53,27 +53,12 @@ use super::path_safety::validate_workspace_root;
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_secs(5);
 
-/// Per-process random nonce mixed into every issued token. Without this, a
-/// process restart would reset the monotonic counter to 0; if the renderer's
-/// in-memory token state survived a sidecar reload (or a future feature
-/// persisted tokens), a stale token "0" would collide with the new process's
-/// fresh "0" and the wrong watcher would be stopped. The nonce is computed
-/// once at first use; format is `{nonce:016x}-{counter:016x}`.
-fn process_nonce() -> u64 {
-    static NONCE: OnceLock<u64> = OnceLock::new();
-    *NONCE.get_or_init(|| {
-        // Reuse the same hashing primitive used elsewhere (DefaultHasher /
-        // SipHash-1-3) instead of pulling in `rand` for one u64. Mixing
-        // process pid + monotonic time gives enough entropy for a startup
-        // nonce; cryptographic strength isn't required.
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::process::id().hash(&mut hasher);
-        if let Ok(t) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            t.as_nanos().hash(&mut hasher);
-        }
-        hasher.finish()
-    })
-}
+// Note: token format is `{counter:016x}` (single u64). Tokens are
+// in-memory only — DirectoryPanel issues at mount, holds in React state, and
+// returns at unmount. No persistence path exists today, so cross-process
+// counter collision is not reachable. If any future code path persists tokens
+// across a sidecar/process restart, prepend a per-process nonce here so a
+// stale token from before the restart can be rejected.
 
 /// Tauri State entry — a process-wide registry of active workspace watchers.
 /// `Mutex` is fine here: start/stop are rare (Tab open/close), the lock is
@@ -136,10 +121,9 @@ pub async fn cmd_workspace_watch_start(
 
     // Issue token first so we can register it under the lock atomically with
     // the registry mutation. Wrapping order: registry → token_index, both
-    // briefly held. Token surface: `{nonce:016x}-{counter:016x}` — the nonce
-    // protects against cross-process counter collision (see `process_nonce`).
+    // briefly held.
     let token_n = state.next_token.fetch_add(1, Ordering::Relaxed);
-    let token = format!("{:016x}-{:016x}", process_nonce(), token_n);
+    let token = format!("{:016x}", token_n);
 
     let mut registry = state.inner.lock().map_err(|e| format!("lock: {}", e))?;
     let mut tokens = state
@@ -217,12 +201,10 @@ pub async fn cmd_workspace_watch_stop(
     state: tauri::State<'_, Arc<WorkspaceWatchers>>,
 ) -> Result<(), String> {
     // Parse the token. Bad input is a no-op (matches the "stop is best-effort"
-    // contract — caller might double-stop on unmount). The nonce-prefixed
-    // format also rejects tokens issued by a previous process incarnation
-    // (different nonce → no entry in token_index → no-op).
-    let token_n = match parse_token(&token) {
-        Some(n) => n,
-        None => return Ok(()),
+    // contract — caller might double-stop on unmount).
+    let token_n = match u64::from_str_radix(&token, 16) {
+        Ok(n) => n,
+        Err(_) => return Ok(()),
     };
 
     // Lock order: REGISTRY → TOKENS (matches `watch_start`). Cross-review
@@ -263,19 +245,6 @@ pub async fn cmd_workspace_watch_stop(
         );
     }
     Ok(())
-}
-
-/// Split a `{nonce:016x}-{counter:016x}` token and return the counter half
-/// only when the nonce matches this process. Returning `None` for foreign
-/// tokens keeps `watch_stop` a true no-op for stale renderer state from
-/// before a process restart.
-fn parse_token(token: &str) -> Option<u64> {
-    let (nonce_str, counter_str) = token.split_once('-')?;
-    let nonce = u64::from_str_radix(nonce_str, 16).ok()?;
-    if nonce != process_nonce() {
-        return None;
-    }
-    u64::from_str_radix(counter_str, 16).ok()
 }
 
 #[cfg(test)]
@@ -339,33 +308,9 @@ mod tests {
     #[test]
     fn watch_stop_invalid_token_is_noop() {
         let registry = WorkspaceWatchers::default();
-        // Various malformed token shapes — all should produce None from
-        // `parse_token`, which the cmd handler treats as a no-op:
-        // - non-hex
-        assert!(parse_token("not-hex").is_none());
-        // - missing dash
-        assert!(parse_token("0123456789abcdef").is_none());
-        // - foreign nonce (definitely won't match this process)
-        assert!(parse_token("0000000000000000-0000000000000001").is_none());
-        let registry_empty = registry.inner.lock().unwrap().is_empty();
-        assert!(registry_empty);
-    }
-
-    // Cross-review round 2 (Codex MED-2): the nonce protects against the
-    // case where renderer state holds a token across a sidecar/process
-    // restart. After restart, `process_nonce()` returns a different value
-    // → `parse_token` rejects the stale token → stop becomes a no-op
-    // rather than mis-stopping a fresh watcher that happened to draw the
-    // same counter.
-    #[test]
-    fn parse_token_rejects_foreign_nonce() {
-        // Build a "current process" token and verify it round-trips.
-        let token = format!("{:016x}-{:016x}", process_nonce(), 42u64);
-        assert_eq!(parse_token(&token), Some(42));
-        // Build a token with a manually chosen nonce that is unlikely to
-        // collide with the live one — flip the high bit.
-        let bad_nonce = process_nonce() ^ 0x8000_0000_0000_0000;
-        let foreign = format!("{:016x}-{:016x}", bad_nonce, 42u64);
-        assert!(parse_token(&foreign).is_none());
+        // Bad input is treated as no-op: the cmd handler swallows the
+        // parse error and returns `Ok(())`. The empty registry remains so.
+        assert!(u64::from_str_radix("not-hex", 16).is_err());
+        assert!(registry.inner.lock().unwrap().is_empty());
     }
 }
