@@ -35,6 +35,11 @@ interface BrandSectionProps {
     defaultWorkspacePath?: string;
     onSelectWorkspace: (project: Project) => void;
     onAddFolder: () => void;
+    /** Promote a project to the global default workspace (writes
+     *  `config.defaultWorkspacePath`). Threaded through to the chip row's
+     *  WorkspaceSelector so its hover-only "设为默认" button has somewhere
+     *  to write. */
+    onSetDefaultWorkspace?: (project: Project) => void;
     // Input — `cron` carries the launcher-staged cron config forward so the
     // Launcher → InitialMessage handoff can include it (PRD 0.2.7 Cron handoff).
     onSend: (
@@ -82,6 +87,7 @@ export default memo(function BrandSection({
     defaultWorkspacePath,
     onSelectWorkspace,
     onAddFolder,
+    onSetDefaultWorkspace,
     onSend,
     isStarting,
     provider,
@@ -550,6 +556,7 @@ export default memo(function BrandSection({
                                 defaultWorkspacePath={defaultWorkspacePath}
                                 onSelectWorkspace={onSelectWorkspace}
                                 onAddFolder={onAddFolder}
+                                onSetDefaultWorkspace={onSetDefaultWorkspace}
                                 showRuntime={!!multiAgentRuntimeEnabled}
                                 runtime={activeRuntime}
                                 runtimeDetections={runtimeDetections}

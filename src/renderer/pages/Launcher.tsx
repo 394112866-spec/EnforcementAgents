@@ -386,6 +386,21 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         }));
     }, []);
 
+    // Promote a project to the global default workspace. Same code path as
+    // Settings → 通用设置 → 默认工作区 (`updateConfig({ defaultWorkspacePath })`)
+    // — keeps the WorkspaceSelector dropdown in sync with the existing config
+    // surface so a change made here shows up in Settings on next open and
+    // vice versa. Failure is non-fatal — toast a warning but keep the dropdown
+    // usable; the user can retry.
+    const handleSetDefault = useCallback(async (project: Project) => {
+        try {
+            await updateConfig({ defaultWorkspacePath: project.path });
+        } catch (err) {
+            console.error('[Launcher] failed to set default workspace:', err);
+            toastRef.current.warning('设为默认失败，请重试');
+        }
+    }, [updateConfig]);
+
     // Handle send from BrandSection — `cron` is the launcher-staged cron config
     // (PRD 0.2.7 D1); when present, Chat's autoSend dispatches startCronTask
     // instead of sendMessage.
@@ -634,6 +649,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         defaultWorkspacePath={config.defaultWorkspacePath}
                         onSelectWorkspace={setSelectedWorkspace}
                         onAddFolder={handleAddProject}
+                        onSetDefaultWorkspace={handleSetDefault}
                         onSend={handleBrandSend}
                         isStarting={launchingProjectId === selectedWorkspace?.id && isStarting}
                         provider={launcherProvider}

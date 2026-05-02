@@ -29,6 +29,9 @@ interface LauncherInputContextRowProps {
   defaultWorkspacePath?: string;
   onSelectWorkspace: (project: Project) => void;
   onAddFolder: () => void;
+  /** Promote a project to default workspace via the dropdown's hover-only
+   *  "设为默认" button. Threaded straight through to WorkspaceSelector. */
+  onSetDefaultWorkspace?: (project: Project) => void;
 
   // Runtime (only rendered when multiAgentRuntime gate is on AND callers
   // supply onRuntimeChange — keeps the chip out of the row entirely if the
@@ -55,6 +58,7 @@ export default memo(function LauncherInputContextRow({
   defaultWorkspacePath,
   onSelectWorkspace,
   onAddFolder,
+  onSetDefaultWorkspace,
   showRuntime,
   runtime,
   runtimeDetections,
@@ -69,6 +73,7 @@ export default memo(function LauncherInputContextRow({
           defaultWorkspacePath={defaultWorkspacePath}
           onSelect={onSelectWorkspace}
           onAddFolder={onAddFolder}
+          onSetDefault={onSetDefaultWorkspace}
         />
       </div>
       {showRuntime && runtime && runtimeDetections && onRuntimeChange && (
