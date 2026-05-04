@@ -1455,7 +1455,7 @@ pub async fn cmd_open_file(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        crate::process_cmd::new("open")
             .arg(&safe_path)
             .spawn()
             .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
@@ -1463,14 +1463,14 @@ pub async fn cmd_open_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // Use explorer.exe instead of cmd /C start to avoid shell metacharacter injection
-        std::process::Command::new("explorer")
+        crate::process_cmd::new("explorer")
             .arg(&safe_path)
             .spawn()
             .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
+        crate::process_cmd::new("xdg-open")
             .arg(&safe_path)
             .spawn()
             .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;

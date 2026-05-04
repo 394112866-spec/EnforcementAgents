@@ -16,6 +16,7 @@
 
 use crate::logger;
 use crate::proxy_config;
+use crate::ulog_info;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, State};
@@ -207,12 +208,12 @@ fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Upd
 
     if let Some(proxy_settings) = proxy_config::read_proxy_settings() {
         let proxy_url = proxy_config::get_proxy_url(&proxy_settings)?;
-        log::info!("[Updater] Using proxy for update requests: {}", proxy_url);
+        ulog_info!("[Updater] Using proxy for update requests: {}", proxy_url);
         let url = reqwest::Url::parse(&proxy_url)
             .map_err(|e| format!("Invalid proxy URL '{}': {}", proxy_url, e))?;
         builder = builder.proxy(url);
     } else {
-        log::info!("[Updater] No proxy configured, inheriting system network behavior");
+        ulog_info!("[Updater] No proxy configured, inheriting system network behavior");
         // Don't call .no_proxy() — let the updater respect system proxy settings
         // (Clash TUN, global proxy, etc.) just like other normal applications.
     }

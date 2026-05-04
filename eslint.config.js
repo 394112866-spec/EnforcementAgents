@@ -10,6 +10,36 @@ import ts from 'typescript-eslint';
 
 const gitignorePath = fileURLToPath(new URL('./.gitignore', import.meta.url));
 
+// CLAUDE.md red-line selectors that apply EVERYWHERE (renderer + sidecar +
+// shared). Spread into every block that defines `no-restricted-syntax`,
+// because Flat Config's later-block-wins semantics would otherwise wipe
+// these rules for files matched by a more specific block (the existing
+// renderer-block / Phase-E selectors hit this exact trap — see the comment
+// near line 68 for the post-mortem). Defining the array once and spreading
+// it keeps the single-source-of-truth without re-introducing the bug.
+const GLOBAL_RESTRICTED_SYNTAX = [
+  {
+    // CLAUDE.md red-line: synchronous busy-wait blocks the event loop.
+    // Sidecar busy-wait kills the SDK pump; renderer busy-wait freezes
+    // the UI. Only async polling is allowed.
+    selector: "MemberExpression[object.name='Atomics'][property.name='wait']",
+    message: 'Atomics.wait blocks the event loop. Use async polling (setTimeout / setInterval / withFileLock helpers). CLAUDE.md red-line.'
+  },
+  {
+    // CLAUDE.md red-line: `new Date().toISOString().split('T')[0]` returns
+    // the UTC date — in CN timezone (UTC+8) it differs from the local date
+    // for ~1/3 of every day, so it doesn't match the local-date filename
+    // used by `~/.myagents/logs/unified-{YYYY-MM-DD}.log`. Use `localDate()`
+    // from `shared/logTime.ts`. Selector matches `<expr>.toISOString().split('T')[0]`
+    // — the `MemberExpression > CallExpression[callee.property.name='split']`
+    // shape with toISOString as inner call.
+    selector:
+      "CallExpression[callee.property.name='split'][callee.object.type='CallExpression'][callee.object.callee.property.name='toISOString'][arguments.0.value='T']",
+    message:
+      "toISOString().split('T')[0] returns UTC date — local date differs in CN timezone (UTC+8). Use localDate() from '@/shared/logTime'. CLAUDE.md red-line."
+  }
+];
+
 export default defineConfig(
   includeIgnoreFile(gitignorePath),
   {
@@ -106,6 +136,7 @@ export default defineConfig(
       // can still reference these strings in CLAUDE.md / PRD docs.
       'no-restricted-syntax': [
         'error',
+        ...GLOBAL_RESTRICTED_SYNTAX,
         // Dynamic-import guard for `@tauri-apps/api/event`. Catches
         // `import('@tauri-apps/api/event').then(({ listen }) => …)` which
         // bypasses the static `no-restricted-imports` rule above — that
@@ -243,6 +274,41 @@ export default defineConfig(
           ]
         }
       ]
+    }
+  },
+  // Sidecar (`src/server/**`): esbuild bundles this into a single
+  // `server-dist.js`, and during bundling it hardcodes `__dirname` to the
+  // SOURCE file's directory at compile time. At runtime that path is wrong
+  // (the file moved into `dist/`), so any `path.join(__dirname, ...)` reads
+  // a stale or non-existent path. CLAUDE.md red-line: use
+  // `fileURLToPath(import.meta.url)` or `getScriptDir()` instead.
+  //
+  // Spreads GLOBAL_RESTRICTED_SYNTAX so sidecar files also get the
+  // Atomics.wait + UTC-date bans (see header — Flat Config later-block-wins
+  // would otherwise wipe them for files matched by this block).
+  {
+    files: ['src/server/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...GLOBAL_RESTRICTED_SYNTAX,
+        {
+          selector: "Identifier[name='__dirname']",
+          message:
+            'esbuild hardcodes `__dirname` at bundle time → runtime path is wrong (file lives in dist/). Use `fileURLToPath(import.meta.url)` or `getScriptDir()` from `@/server/utils/runtime`. CLAUDE.md red-line.'
+        }
+      ]
+    }
+  },
+  // Other-files catchall: shared / cli / scripts that didn't match any
+  // earlier block above still need the Atomics.wait + UTC-date bans.
+  // The renderer + sidecar blocks override this for their own files
+  // (carrying GLOBAL_RESTRICTED_SYNTAX inside them).
+  {
+    files: ['src/**/*.{ts,tsx,js,mjs,cjs}'],
+    ignores: ['src/renderer/**', 'src/server/**'],
+    rules: {
+      'no-restricted-syntax': ['error', ...GLOBAL_RESTRICTED_SYNTAX]
     }
   }
 );

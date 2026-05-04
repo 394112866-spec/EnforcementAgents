@@ -1301,13 +1301,12 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
         // taskkill /T kills the entire process tree (including SDK subprocess and MCP servers)
         // taskkill /F forces termination
-        let result = Command::new("taskkill")
+        // process_cmd::new applies CREATE_NO_WINDOW automatically, replacing
+        // the previous manual creation_flags() call.
+        let result = crate::process_cmd::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
-            .creation_flags(CREATE_NO_WINDOW)
             .output();
         match result {
             Ok(output) => {
