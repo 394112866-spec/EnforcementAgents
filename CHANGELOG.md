@@ -11,31 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **任务模型选择器跨厂商**：任务编辑 → 高级配置 → 模型，按厂商分组列出全部已配置的 provider；外部 runtime（Codex / Claude Code / Gemini）也有自家 picker (#130)。
-- **Markdown 链接 Cmd/Ctrl+click 直开系统浏览器**：绕过内置浏览器面板 (#126)。
-- **输入框自动撑高**：去掉手动展开按钮，最多 9 行后内部滚动 (#129)。
+- **任务编辑器：模型选择器跨厂商**：任务的「高级配置 → 模型」现在按厂商分组列出全部已配置的 provider，和 Chat / Agent 设置一致；外部 runtime（Codex / Claude Code / Gemini）也带自家的 model picker (#130)。
+- **Markdown 链接 Cmd/Ctrl+click 直接走系统浏览器**：绕开内置浏览器面板 (#126)。
+- **输入框跟随内容自动撑高**：去掉手动展开按钮，最多 9 行后内部滚动 (#129)。
 
 ### Changed
 
-- **Task / Cron provider 路由 live-resolve**：持久层只存 `providerId`，不再写 apiKey / baseUrl。Sidecar 每次 tick 从 `~/.myagents/config.json` 实时解析——轮换 API Key 立即生效，无需重存任务。
-- **Schema 强约束**：写入时校验 `providerId` 与 `model` 配对；外部 runtime 禁止同时持有 `providerId`，避免静默错路由。
-- **架构 lint 三层加固**：clippy 加 `reqwest`/`which`/`Command::new`/`log::*` 禁令；eslint 加 `Atomics.wait`、UTC 日期、sidecar `__dirname`、原生 `<select>`、tools/bridge 裸 `fetch()`、`shouldAbortSession = true`；新增 dependency-cruiser 6 条架构规则（`npm run lint:deps`）。CLAUDE.md 红线表加 Lint 列，每条标注是否工具拦截。
+- **API Key 轮换立即对在跑的任务/定时任务生效**：之前任务里"用哪个 provider"是创建时的快照——你换 Key 后还得重存一遍每个任务才生效。现在任务只记住 provider 的选择，每次执行都从设置里实时读 Key / baseUrl。
+- **任务编辑校验**：保存任务时检查"provider + model 配对"和"外部 runtime ↔ provider 互斥"，避免出现执行时静默走错配置的情况。
 
 ### Fixed
 
-- **Cron 切回订阅仍跑在第三方 provider** (#119 残留)：sidecar 现在收到显式 `'subscription'` sentinel 才清 provider。
-- **Provider 删除后老 cron 用旧 key 偷跑**：下一次 tick 拒绝执行并标 Blocked。
-- **Aliyun Bailian Coding Plan 模型探活失败** (#127)：跳过 model discovery。
-- **Windows 打开外链闪 CMD 黑窗**：所有 OS opener 走 `process_cmd::new`。
-- **Plugin-bridge 8 处裸 `fetch()` 在飞书慢响应时挂死**：改走 `cancellableFetch`（30s 超时 + 父级 abort 传递）。
-- **`logger.ts ↔ sse.ts` 静态循环依赖**：抽 `SSE_INSTANCE_ID` 到 leaf 模块 `sse-instance.ts`。
-- **空白 API Key 被当合法 key 发到上游**：`resolveProviderEnv` 现在拒绝纯空白。
-- **skill-sync 重复创建报 `File exists`**：symlink 已正确则 no-op，benign EEXIST 降到 debug。
-- **sidecar/bridge stderr 误标 ERROR**：`[startup]` / `[log-retention]` → INFO，`[sdk-shim]` → WARN，按行首前缀匹配。
+- **切回订阅后定时任务仍跑在第三方供应商**：PRD #119 留下的潜在 bug，订阅切换语义现在正确。
+- **第三方供应商被删除后老定时任务还在用旧 Key**：删除后的下一次 tick 不再偷跑，会把任务标 Blocked。
+- **空白 API Key 被当合法值发到上游产生 401**：现在直接拒绝并提示"未配置 Key"。
+- **阿里百炼 Coding Plan 添加后模型管理报错** (#127)：跳过该 provider 的模型探活。
+- **Windows 上点外链每次闪一个 CMD 黑窗**。
+- **飞书慢响应时 IM Bot 消息挂死直到分钟级 OS 超时**：上游 fetch 现在带 30s 超时 + 父级取消传递。
 
 ### Migration
 
-- 0.2.8 及更早的定时任务带 frozen `provider_env` 仍可加载并运行（兼容路径），用户在编辑面板保存任意一次即迁到 live-resolve；sidecar 启动日志输出 `[CronTask] N legacy task(s) still carry frozen provider_env` 便于追踪。
+- 0.2.8 及更早创建、带凭据快照的定时任务仍可加载执行（兼容路径），用户在「任务编辑」里保存任意一次即迁到新的实时解析路径。
 
 ---
 
