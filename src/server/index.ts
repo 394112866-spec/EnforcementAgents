@@ -83,7 +83,7 @@ import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
-import type { McpServerDefinition } from '../renderer/config/types';
+import type { McpServerDefinition } from '../shared/config-types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
 import {
   setCronTaskContext,

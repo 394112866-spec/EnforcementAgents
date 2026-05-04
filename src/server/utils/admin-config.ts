@@ -21,8 +21,8 @@ import {
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
-import type { McpServerDefinition } from '../../renderer/config/types';
-import { PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../renderer/config/types';
+import type { McpServerDefinition } from '../../shared/config-types';
+import { PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
 import type { SessionMetadata } from '../types/session';
 import { ensureDirSync } from './fs-utils';
 import { withFileLock, FileBusyError } from './file-lock';

@@ -1046,6 +1046,11 @@ function abortPersistentSession(): void {
     console.warn('[agent] Browser tools were used but storage state was not saved. Login state from this session may be lost.');
   }
 
+  // This is the ONLY legitimate `shouldAbortSession = true` site — it is
+  // the abort entry point and performs the full cleanup chain below
+  // (rescue pending, IM bus notify, generator wake). The lint ban exists
+  // so other code can't bypass this teardown by setting the flag directly.
+  // eslint-disable-next-line no-restricted-syntax
   shouldAbortSession = true;
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
@@ -1138,7 +1143,7 @@ function resetTurnUsage(): void {
 }
 
 // ===== MCP Configuration =====
-import type { McpServerDefinition } from '../renderer/config/types';
+import type { McpServerDefinition } from '../shared/config-types';
 // SDK's in-process server instance type — what createSdkMcpServer() returns.
 // Imported as a type (no runtime cost) so we can annotate the buildSdkMcpServers
 // result map without relying on a module-level singleton.
