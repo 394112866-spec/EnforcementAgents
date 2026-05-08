@@ -54,45 +54,127 @@ pub fn validate_cron_expression(expr: &str, tz: Option<&str>) -> Result<(), Stri
 /// Translate a Unix-style day-of-week field (0-7, Sun=0 or Sun=7) into the
 /// `cron` crate's day-of-week numbering (1-7, Sun=1, Sat=7 — Quartz semantics).
 ///
-/// Why: `cron` v0.15 rejects `0` for DOW with "Days of Week must be greater than
-/// or equal to 1", and even when numeric DOW values parse, they're shifted vs.
-/// the Unix convention the rest of the app uses (frontend `CronExpressionInput`,
-/// CLI scheduling, AI tool calls all generate Unix-style cron). Without this
-/// translation, `0 21 * * 0` (every Sunday) is rejected outright, and
-/// `0 8 * * 1-5` (Mon-Fri in Unix) silently fires Sun-Thu in cron-crate land.
+/// Why: `cron` v0.15 rejects `0` for DOW with "Days of Week must be greater
+/// than or equal to 1", and even when numeric DOW values parse, they're
+/// shifted vs. the Unix convention the rest of the app uses (frontend
+/// `CronExpressionInput`, CLI scheduling, AI tool calls all generate
+/// Unix-style cron). Without this translation, `0 21 * * 0` is rejected
+/// outright, and `0 8 * * 1-5` (Mon-Fri in Unix) silently fires Sun-Thu in
+/// crate land.
 ///
-/// Handles wildcards (`*`, `?`), single values, ranges (`a-b`), lists
-/// (`a,b,c`), steps (`a/b`, `*/b`), and named days (`SUN`-`SAT`, passed through
-/// unchanged because the crate already accepts them). Step values are
-/// preserved as-is — `*/2` means the same days under both numberings.
+/// Approach: fully enumerate the Unix days the token represents, shift each
+/// to its crate equivalent (so `5-7` Fri-Sun → `{6,7,1}` not the invalid
+/// `6-1`, and `1-7/2` Mon/Wed/Fri/Sun → `{2,4,6,1}` not the wrong-phase
+/// `*/2`), then re-emit as a sorted comma list with consecutive runs
+/// compressed back into ranges. Tokens containing names (`SUN`-`SAT`) or
+/// `?` are passed through — the crate accepts those natively.
 fn translate_unix_dow_to_crate_dow(dow: &str) -> String {
-    fn shift_unix(s: &str) -> String {
-        match s.parse::<u32>() {
-            Ok(0) | Ok(7) => "1".to_string(),  // Sunday (Unix 0 or 7 → crate 1)
-            Ok(n @ 1..=6) => (n + 1).to_string(),
-            _ => s.to_string(),  // wildcard, name, or out-of-range — pass through
+    use std::collections::BTreeSet;
+
+    fn shift_unix(n: u32) -> u32 {
+        match n {
+            0 | 7 => 1, // Sunday (Unix 0 or 7 → crate 1)
+            1..=6 => n + 1,
+            _ => n,
         }
     }
-    fn translate_base(s: &str) -> String {
-        // Range "a-b" → translate both endpoints. The two "all days" combos
-        // that wrap (0-7, 1-7 in Unix) collapse to `*` to avoid the post-shift
-        // result being an invalid range like `2-1`.
-        if let Some((start, end)) = s.split_once('-') {
-            if (start, end) == ("0", "7") || (start, end) == ("1", "7") {
-                return "*".to_string();
+
+    /// Enumerate the Unix DOW values a token represents (0-7, where 7 also
+    /// means Sunday). Returns `None` for anything we'd rather pass through
+    /// (named days, `?`, malformed tokens).
+    fn token_to_unix_days(token: &str) -> Option<Vec<u32>> {
+        if token.is_empty() {
+            return None;
+        }
+        if token == "*" {
+            return Some((0..=6).collect());
+        }
+        if token == "?" {
+            return None;
+        }
+        if let Some((base, step_str)) = token.split_once('/') {
+            let step: u32 = step_str.parse().ok()?;
+            if step == 0 {
+                return None;
             }
-            return format!("{}-{}", shift_unix(start), shift_unix(end));
+            let (start, end) = if base == "*" {
+                (0u32, 6u32)
+            } else if let Some((s, e)) = base.split_once('-') {
+                (s.parse().ok()?, e.parse().ok()?)
+            } else {
+                // single + step: "N/k" enumerates N, N+k, ... up to 7 (covers Sunday alias)
+                let n: u32 = base.parse().ok()?;
+                (n, 7u32)
+            };
+            if start > 7 || end > 7 || start > end {
+                return None;
+            }
+            return Some((start..=end).step_by(step as usize).collect());
         }
-        shift_unix(s)
-    }
-    fn translate_token(token: &str) -> String {
-        // Step "a/b" or "*/b" — translate base, leave step untouched
-        if let Some((base, step)) = token.split_once('/') {
-            return format!("{}/{}", translate_base(base), step);
+        if let Some((s, e)) = token.split_once('-') {
+            let start: u32 = s.parse().ok()?;
+            let end: u32 = e.parse().ok()?;
+            if start > 7 || end > 7 || start > end {
+                return None;
+            }
+            return Some((start..=end).collect());
         }
-        translate_base(token)
+        let n: u32 = token.parse().ok()?;
+        if n > 7 {
+            return None;
+        }
+        Some(vec![n])
     }
-    dow.split(',').map(translate_token).collect::<Vec<_>>().join(",")
+
+    /// Compact a sorted set of crate days back into the most readable form:
+    /// 7 days → `*`, consecutive runs of ≥3 → `a-b`, otherwise comma list.
+    fn format_crate_days(days: &BTreeSet<u32>) -> String {
+        if days.len() == 7 {
+            return "*".to_string();
+        }
+        let sorted: Vec<u32> = days.iter().copied().collect();
+        let mut parts: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < sorted.len() {
+            let run_start = sorted[i];
+            let mut run_end = run_start;
+            while i + 1 < sorted.len() && sorted[i + 1] == run_end + 1 {
+                run_end = sorted[i + 1];
+                i += 1;
+            }
+            if run_end >= run_start + 2 {
+                parts.push(format!("{}-{}", run_start, run_end));
+            } else if run_end == run_start + 1 {
+                parts.push(run_start.to_string());
+                parts.push(run_end.to_string());
+            } else {
+                parts.push(run_start.to_string());
+            }
+            i += 1;
+        }
+        parts.join(",")
+    }
+
+    let mut crate_days: BTreeSet<u32> = BTreeSet::new();
+    for token in dow.split(',') {
+        match token_to_unix_days(token) {
+            Some(unix_days) => {
+                for d in unix_days {
+                    crate_days.insert(shift_unix(d));
+                }
+            }
+            None => {
+                // Fall back: any non-numeric token (named day, `?`, malformed)
+                // means we can't safely fully enumerate — pass through verbatim.
+                // This is rare in practice; the crate accepts SUN-SAT names natively.
+                return dow.to_string();
+            }
+        }
+    }
+    if crate_days.is_empty() {
+        return dow.to_string();
+    }
+    format_crate_days(&crate_days)
 }
 
 /// Parse a cron expression and compute the next fire time as a wall-clock UTC timestamp.
@@ -4040,19 +4122,26 @@ mod cron_dialect_tests {
         assert_eq!(translate_unix_dow_to_crate_dow("6"), "7");   // Saturday
         // Wildcards
         assert_eq!(translate_unix_dow_to_crate_dow("*"), "*");
-        assert_eq!(translate_unix_dow_to_crate_dow("?"), "?");
-        // Ranges
+        assert_eq!(translate_unix_dow_to_crate_dow("?"), "?");   // Quartz wildcard, pass through
+        // Forward ranges (no Sunday-alias wrap)
         assert_eq!(translate_unix_dow_to_crate_dow("1-5"), "2-6");   // Mon-Fri
-        assert_eq!(translate_unix_dow_to_crate_dow("0-6"), "1-7");   // all days, Unix Sun=0 form
+        assert_eq!(translate_unix_dow_to_crate_dow("0-6"), "*");     // all days, Unix Sun=0 form
         assert_eq!(translate_unix_dow_to_crate_dow("0-7"), "*");     // wraps → all days
         assert_eq!(translate_unix_dow_to_crate_dow("1-7"), "*");     // wraps → all days
+        // Wrap-around ranges that hit Sunday-alias 7 — must enumerate, not
+        // produce invalid descending crate ranges like "6-1"
+        assert_eq!(translate_unix_dow_to_crate_dow("5-7"), "1,6,7"); // Fri-Sun
+        assert_eq!(translate_unix_dow_to_crate_dow("2-7"), "1,3-7"); // Tue-Sun
         // Lists
         assert_eq!(translate_unix_dow_to_crate_dow("0,3,5"), "1,4,6");
         assert_eq!(translate_unix_dow_to_crate_dow("1,3,5"), "2,4,6");
-        // Step values — semantically same days under both numberings
-        assert_eq!(translate_unix_dow_to_crate_dow("*/2"), "*/2");
-        assert_eq!(translate_unix_dow_to_crate_dow("0/2"), "1/2");
-        assert_eq!(translate_unix_dow_to_crate_dow("1-5/2"), "2-6/2");
+        // Step values — must produce same days as the Unix expression
+        // `*/2` Unix (0,2,4,6 = Sun/Tue/Thu/Sat) → crate (1,3,5,7 = same days)
+        assert_eq!(translate_unix_dow_to_crate_dow("*/2"), "1,3,5,7");
+        assert_eq!(translate_unix_dow_to_crate_dow("0/2"), "1,3,5,7");
+        assert_eq!(translate_unix_dow_to_crate_dow("1-5/2"), "2,4,6"); // Mon,Wed,Fri
+        // 1-7/2 Unix = Mon,Wed,Fri,Sun (NOT */2 phase). Must preserve phase.
+        assert_eq!(translate_unix_dow_to_crate_dow("1-7/2"), "1,2,4,6");
         // Named days pass through unchanged (cron crate already accepts them)
         assert_eq!(translate_unix_dow_to_crate_dow("SUN"), "SUN");
         assert_eq!(translate_unix_dow_to_crate_dow("MON-FRI"), "MON-FRI");
