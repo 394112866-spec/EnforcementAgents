@@ -1982,7 +1982,12 @@ async function main() {
           if (result.error) {
             return jsonResponse({ success: false, error: result.error }, 429);
           }
-          return jsonResponse({ success: true, queued: result.queued, queueId: result.queueId });
+          return jsonResponse({
+            success: true,
+            queued: result.queued,
+            queueId: result.queueId,
+            isInFlight: result.isInFlight,
+          });
         } catch (error) {
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
@@ -4700,7 +4705,14 @@ async function main() {
               const { pinMcpPackageVersions } = await import('./agent-session');
               const args = pinMcpPackageVersions(server.args || []);
 
-              const { spawn } = await import('child_process');
+              // Route through utils/subprocess.spawn — on Windows the bundled
+              // and system npx are both `npx.cmd` shims. Calling .cmd via raw
+              // `child_process.spawn` returns EINVAL on Node ≥20.12 (CVE-2024-27980),
+              // and Node's own `shell: true` workaround does NOT escape inner
+              // quotes / metachars in args. The wrapper handles both — see
+              // utils/subprocess.ts::spawn for the cmd.exe wrapping + cross-spawn
+              // escape algorithm.
+              const { spawn: wrappedSpawn } = await import('./utils/subprocess');
               const { getShellEnv } = await import('./utils/shell');
               const baseEnv = getShellEnv();
 
