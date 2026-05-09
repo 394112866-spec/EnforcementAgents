@@ -6263,7 +6263,13 @@ export async function enqueueUserMessage(
     return { queued: true, queueId, isInFlight: inFlightToCliId === queueId };
   }
 
-  // Direct send path: push user message to messages[] and broadcast immediately
+  // Direct send path: push user message to messages[] and broadcast immediately.
+  // NOTE (issue #173): this is the SOLE writer to messages[] for direct-send.
+  // The messageGenerator's `!item.wasQueued` branch intentionally does NOT
+  // push again — see the matching comment block there. Re-introducing a push
+  // anywhere downstream of this site duplicates the user bubble in the UI
+  // (different messageSequence id breaks frontend dedup) and writes two
+  // SessionStore entries.
   const userMessage: MessageWire = {
     id: String(messageSequence++),
     role: 'user',
@@ -9061,39 +9067,30 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       console.log(`[agent] pre-warm → active (from queued message), sessionRegistered=${sessionRegistered}`);
     }
 
-    // Direct-send items (wasQueued=false): no turn in flight when enqueued.
-    // Push user message to messages[], persist, register turn-scoped state.
+    // Direct-send items (wasQueued=false): enqueueUserMessage already pushed
+    // the user message to messages[], persisted it, and broadcast
+    // chat:message-replay. Generator MUST NOT push again — doing so allocates
+    // a second `messageSequence++` id and writes a second SessionStore entry
+    // (issue #173). Generator's job here is purely turn-scoped state setup so
+    // the upcoming yield's response is properly tracked.
     //
-    // wasQueued=true items go a different path: their messages[] push +
+    // queue:started is intentionally NOT broadcast for direct-send: the
+    // message never went through the queue UI from the user's perspective,
+    // and the chat bubble is already visible from chat:message-replay. Re-
+    // broadcasting would cause the frontend's seenIdsRef dedup to fail when
+    // generator's local id differs from the one already in history.
+    //
+    // wasQueued=true items take a different path: their messages[] push +
     // queue:started broadcast happens later in handleQueuedCommandReplay()
     // (or the turn-end fallback in handleMessageComplete) when the CLI
     // confirms AI saw the message. Until then they live as an "in-flight"
     // pill in the frontend queue panel.
     if (!item.wasQueued) {
-      const userMessage: MessageWire = {
-        id: String(messageSequence++),
-        role: 'user',
-        content: item.messageText,
-        timestamp: new Date().toISOString(),
-        attachments: item.attachments,
-      };
-      messages.push(userMessage);
-      await persistMessagesToStorage();
       resetTurnUsage();
       currentTurnStartTime = Date.now();
       if (sessionId) beginTurnAbort(sessionId);
       const turnId = randomUUID().replace(/-/g, '').slice(0, 8);
       setAmbientLogContext(sessionId, { turnId, sessionId });
-      broadcast('queue:started', {
-        queueId: item.id,
-        userMessage: {
-          id: userMessage.id,
-          role: userMessage.role,
-          content: userMessage.content,
-          timestamp: userMessage.timestamp,
-          attachments: userMessage.attachments,
-        },
-      });
     } else if (inFlightToCliId === null) {
       // (v0.2.12 Codex review fix #1) wasQueued item arrived without an
       // existing in-flight tracker. Two paths reach here:
