@@ -838,6 +838,18 @@ const PRE_WARM_MAX_RETRIES = 3;
 // (SDK CLI needs first stdin message before system_init, which never comes for Global Sidecar)
 let preWarmDisabled = false;
 let systemInitInfo: SystemInitInfo | null = null;
+// `sdkControlReady` is the "subprocess fully ready" signal — separate from
+// `system_init`. The SDK CLI's `system/init` is yielded LATE in QueryEngine.submitMessage
+// (after fetchSystemPromptParts → processUserInput → recordTranscript → loadAllPlugins),
+// so it's per-turn metadata, NOT a "boot complete" handshake. By contrast,
+// `Query.initializationResult()` resolves as soon as the subprocess processes the
+// `subtype: "initialize"` control_request — typically <1s after spawn (Codex repro:
+// resolved at +337ms). We track that separately so the UI can distinguish:
+//   subprocess still booting       → 'AI 启动中'   (sdkControlReady=false)
+//   subprocess ready, turn running → '思考中…'    (sdkControlReady=true)
+// Reset to false on any session restart (abort / switchToSession / config-change reload),
+// re-set to true when the next pre-warm's initializationResult resolves.
+let sdkControlReady = false;
 type MessageQueueItem = {
   id: string;                     // Unique queue item ID
   message: SDKUserMessage['message'];
@@ -5403,6 +5415,7 @@ export async function resetSession(): Promise<void> {
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to new session
   messageResolver = null;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
+  sdkControlReady = false; // Subprocess gone — must re-confirm via initializationResult on next pre-warm
 
   // 4b. Keep currentAgentDefinitions — agents are workspace-level config, not session state.
   // Clearing them here causes a race: pre-warm fires before frontend re-syncs agents,
@@ -5525,6 +5538,7 @@ export async function initializeAgent(
   agentDir = nextAgentDir;
   hasInitialPrompt = Boolean(initialPrompt && initialPrompt.trim());
   systemInitInfo = null;
+  sdkControlReady = false;
 
   // Memoize session metadata for the whole initialization pass. Previously this
   // function called getSessionMetadata(initialSessionId) three times (at resume
@@ -5728,6 +5742,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   messageResolver = null;
   setSessionState('idle');
   systemInitInfo = null;
+  sdkControlReady = false;
 
   // Clear SDK ready signal state
   _sdkReadyResolve = null;
@@ -5968,6 +5983,7 @@ export async function enqueueUserMessage(
       lastPersistedIndex = 0;
       persistedSessionMessageCache.length = 0;
       systemInitInfo = null;
+      sdkControlReady = false;
       console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
     }
 
@@ -6109,13 +6125,24 @@ export async function enqueueUserMessage(
     clearTimeout(preWarmTimer);
     preWarmTimer = null;
   }
-  // (issue #174) Use 'starting' if the SDK subprocess hasn't confirmed
-  // system_init yet — this enqueue path runs both when pre-warm already
-  // booted (systemInitInfo set → 'running') and when no pre-warm exists or
-  // pre-warm is still bootstrapping (→ 'starting'). The UI distinguishes
-  // these so users see "AI 启动中" instead of a generic thinking spinner
-  // during the (up to 10-minute) startup timeout window.
-  setSessionState(systemInitInfo ? 'running' : 'starting');
+  // (issue #174 — refined per cross-bugfix 2026-05-10)
+  //
+  // 'starting' = SDK subprocess still booting → UI shows "AI 启动中（首次启动
+  //              可能较慢）" with the cold-start timer.
+  // 'running'  = subprocess ready, turn executing → UI shows "思考中…".
+  //
+  // Original judge `systemInitInfo ? 'running' : 'starting'` mislabels turns:
+  // streamed `system_init` is per-turn metadata (QueryEngine yields it AFTER
+  // processUserInput / skill loading), so a fully pre-warmed session running
+  // a slow first turn (notably /context, 14 internal turns of local
+  // computation, observed at 44s) sat in 'starting' for the entire turn.
+  // The pre-warm path already drove `Query.initializationResult()` to set
+  // `sdkControlReady` once the SDK control plane finished its initialize
+  // handshake, so use that as the actual subprocess-ready signal. Keep
+  // `systemInitInfo` as a fallback: if a session somehow received system_init
+  // without sdkControlReady having flipped (e.g., recovery paths that bypass
+  // pre-warm), the per-turn metadata still proves the subprocess is alive.
+  setSessionState((systemInitInfo || sdkControlReady) ? 'running' : 'starting');
 
   // Save images to disk and create attachment records
   const savedAttachments: MessageWire['attachments'] = [];
@@ -7785,6 +7812,79 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     console.log('[agent] session started');
     console.log('[agent] starting for-await loop on querySession');
+
+    // ── sdkControlReady tracking (subprocess-ready signal) ─────────────────
+    //
+    // The streamed `system_init` we wait for in the for-await loop below is
+    // emitted per-turn by QueryEngine.submitMessage() AFTER fetchSystemPromptParts
+    // → processUserInput → recordTranscript → loadAllPlugins (claude-code/src/
+    // QueryEngine.ts:540). For pre-warm sessions parked at messageGenerator's
+    // waitForMessage(), `system_init` therefore never arrives until the user's
+    // first message kicks off a turn — and worse, slow first turns (notably
+    // /context with num_turns=14 doing local context-usage computation) keep
+    // sessionState='starting' for the full turn duration, mislabeling normal
+    // execution as "AI 启动中（首次启动可能较慢）".
+    //
+    // `Query.initializationResult()` resolves on a different lifecycle event:
+    // the SDK's `subtype: "initialize"` control_request response, which fires
+    // as soon as the subprocess has loaded tools + done MCP handshakes. The F9
+    // (Query) constructor at sdk.mjs already kicks this off in `this.initialization
+    // = this.initialize()` — calling `initializationResult()` here just awaits
+    // the existing promise. Verified empirically with DEBUG_CLAUDE_AGENT_SDK=1:
+    // resolved at +337ms in a clean repro; in MyAgents production with project
+    // settings + playwright MCP the same handshake completes in ~3-5s.
+    //
+    // We use `sdkControlReady` as the gate for the "AI 启动中" UI hint
+    // (enqueueUserMessage near line 6118) so a fully-warmed subprocess running
+    // a slow turn shows '思考中…' instead of '启动中…'. `system_init` keeps its
+    // existing job: source of truth for sessionRegistered / sdkSessionId / tools
+    // / mcp_servers / `systemInitInfo`. Two signals, two purposes — don't merge.
+    //
+    // Fire-and-forget: the for-await loop below needs to start consuming SDK
+    // messages immediately. SDK-internal `readMessages()` (sdk.mjs F9 ctor)
+    // pumps control_responses into pendingControlResponses on its own — does
+    // NOT depend on the outer for-await — so awaiting here would not actually
+    // deadlock. Fire-and-forget is still preferred: this hop is purely a side
+    // signal for UI gating, blocking startStreamingSession's flow on it would
+    // serialize the for-await loop's startup behind it for no benefit.
+    //
+    // Capture `querySession` into `localQuery` and check identity before setting
+    // `sdkControlReady`: if a config-change abort kills this subprocess and a
+    // new pre-warm spawns a different querySession, the OLD promise might
+    // still resolve from a buffered transport response (rare but possible —
+    // see SDK performCleanup which rejects pendings, but a response already
+    // in transport.readMessages's queue can land first). The identity check
+    // prevents the stale resolution from flipping `sdkControlReady=true` for
+    // the wrong subprocess.
+    if (querySession) {
+      const localQuery = querySession;
+      const initStartT = Date.now();
+      void localQuery.initializationResult().then(() => {
+        if (querySession !== localQuery) {
+          // Stale: a session swap happened while initialize was in flight.
+          // The new pre-warm will fire its own initializationResult().
+          return;
+        }
+        sdkControlReady = true;
+        console.log(`[agent] SDK control plane ready in ${Date.now() - initStartT}ms (preWarm=${preWarm})`);
+        // For non-pre-warm cold starts (user sent the very first message with
+        // no prior pre-warm), enqueueUserMessage already set sessionState to
+        // 'starting' (line 6118 — sdkControlReady was false at that moment).
+        // Without this transition, the UI would stay in '启动中' until the slow
+        // streamed system_init lands at the END of the first turn (think /context
+        // 44s); now we promote to 'running' as soon as the SDK control plane
+        // confirms ready (~3-5s in production), matching the actual subprocess
+        // state.
+        if (sessionState === 'starting' && !shouldAbortSession) {
+          setSessionState('running');
+        }
+      }).catch((error) => {
+        // Common cause: control request races against an abort that closes the
+        // subprocess before the response arrives — benign. The next pre-warm
+        // / startStreamingSession will reset and retry.
+        console.warn('[agent] initializationResult() failed:', error instanceof Error ? error.message : error);
+      });
+    }
 
     // Startup timeout: if no system_init arrives, abort.
     // IMPORTANT: Only system_init clears this timeout, NOT other messages like rate_limit_event.
