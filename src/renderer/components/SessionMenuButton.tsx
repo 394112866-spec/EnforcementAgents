@@ -19,6 +19,7 @@
  */
 
 import { forwardRef, useCallback, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
     BarChart2,
     Download,
@@ -391,13 +392,18 @@ export default function SessionMenuButton({
                 </Popover>
             )}
 
-            {/* Stats modal — same component as SessionHistoryDropdown */}
-            {statsTarget && (
+            {/* Stats modal — portal to document.body to escape the chat header's
+             *  z-10 stacking context, otherwise the side workspace panel
+             *  (rendered as a sibling of the chat content) paints over the
+             *  fixed-position OverlayBackdrop. Same fix SessionHistoryDropdown
+             *  applies for the same reason. */}
+            {statsTarget && createPortal(
                 <SessionStatsModal
                     sessionId={statsTarget.id}
                     sessionTitle={statsTarget.title}
                     onClose={() => setStatsTarget(null)}
-                />
+                />,
+                document.body,
             )}
 
             {/* Delete confirm */}
