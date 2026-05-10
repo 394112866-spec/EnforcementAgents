@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowLeft, Bot, Globe, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
@@ -12,7 +12,7 @@ import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import SessionSurfaceTags from '@/components/SessionSurfaceTags';
-import HandoverPopover from '@/components/HandoverPopover';
+import SessionMenuButton from '@/components/SessionMenuButton';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import QueryNavigator from '@/components/chat/QueryNavigator';
@@ -92,14 +92,27 @@ function requiresSignedSessionHistory(providerId?: string): boolean {
   return SIGNED_HISTORY_PROVIDER_IDS.has(providerId);
 }
 
+/** Imperative handle exposed by SessionTitleEditor — lets the SessionMenuButton's
+ *  "重命名" item drive the same inline editor that title-click triggers. */
+export interface SessionTitleEditorHandle {
+  openRename: () => void;
+}
+
 /** Inline-editable session title — click to edit, Enter/Blur to save, Esc to cancel */
-function SessionTitleEditor({ title, onRename }: { title: string; onRename: (newTitle: string) => void }) {
+const SessionTitleEditor = forwardRef<
+  SessionTitleEditorHandle,
+  { title: string; onRename: (newTitle: string) => void }
+>(function SessionTitleEditor({ title, onRename }, ref) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setDraft(title); }, [title]);
   useEffect(() => { if (editing) inputRef.current?.select(); }, [editing]);
+
+  useImperativeHandle(ref, () => ({
+    openRename: () => setEditing(true),
+  }), []);
 
   const commit = () => {
     const trimmed = draft.trim();
@@ -135,7 +148,7 @@ function SessionTitleEditor({ title, onRename }: { title: string; onRename: (new
       )}
     </div>
   );
-}
+});
 
 interface ChatProps {
   onBack?: () => void;
@@ -264,6 +277,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [showLogs, setShowLogs] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const historyBtnRef = useRef<HTMLButtonElement>(null);
+  // Imperative handle for the inline title editor — lets the SessionMenuButton's
+  // "重命名" item invoke the same flow as clicking the title.
+  const titleEditorRef = useRef<SessionTitleEditorHandle>(null);
   // Narrow mode: workspace renders as overlay drawer instead of side panel
   // Initialize from window.innerWidth to avoid layout flash (FOUC) on first render
   const [isNarrowLayout, setIsNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
@@ -2686,16 +2702,38 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return out;
   }, [currentAgent, agentStatuses]);
 
-  const isImOriginSession = sessionMeta?.source ? isImSource(sessionMeta.source) : false;
-  const canHandover = !surfaces.channel
-    && !isImOriginSession
-    && availableHandoverChannels.length > 0;
-
-  // Phase B: handover popover anchor
-  const [handoverAnchorEl, setHandoverAnchorEl] = useState<HTMLElement | null>(null);
-  const handleHandoverClick = useCallback((anchor: HTMLElement) => {
-    setHandoverAnchorEl(anchor);
-  }, []);
+/**
+   * Migrate the current channel binding to a new session id, then reset the
+   * tab onto the new session. Pulled out of `handleNewSession` so the
+   * SessionMenuButton's "新会话（保留绑定）" submenu item can drive the
+   * exact same flow without re-running the unbound fallback paths.
+   */
+  const newSessionKeepingBinding = useCallback(async () => {
+    const boundChannel = surfaces.channel;
+    if (!boundChannel || !sessionId) return;
+    try {
+      const { migrateChannelToNewSession } = await import('@/api/sessionHandoverClient');
+      const newSessionId = await migrateChannelToNewSession({
+        oldSessionId: sessionId,
+        sessionKey: boundChannel.sessionKey,
+      });
+      if (newSessionId) {
+        console.log(`[Chat] Channel-bound new conversation: ${sessionId.slice(0, 8)} → ${newSessionId.slice(0, 8)}`);
+        await resetSession();
+        return;
+      }
+      // Migration returned null (handled error inside the client) — surface
+      // the failure to the user instead of silently no-op'ing, then still
+      // give them a fresh session so the menu click feels responsive.
+      console.warn('[Chat] migrateChannelToNewSession returned null; resetting without rebind');
+      toastRef.current.error('Channel 重绑失败，已就地重置');
+      await resetSession();
+    } catch (err) {
+      console.error('[Chat] Channel surface migration failed, falling back to plain reset:', err);
+      toastRef.current.error('Channel 重绑失败，已就地重置');
+      await resetSession();
+    }
+  }, [surfaces.channel, sessionId, resetSession]);
 
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
@@ -2703,26 +2741,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // PRD 0.2.14: when current session is IM-channel-bound, migrate the binding
   // to the new session so the IM channel keeps routing here (matches IM `/new`).
   const handleNewSession = useCallback(async () => {
-    const boundChannel = surfaces.channel;
-    if (boundChannel && sessionId) {
-      try {
-        const { migrateChannelToNewSession } = await import('@/api/sessionHandoverClient');
-        const newSessionId = await migrateChannelToNewSession({
-          oldSessionId: sessionId,
-          sessionKey: boundChannel.sessionKey,
-        });
-        // Reuse the Sidecar (resetSession path), but tell the caller that a
-        // new session id is in place. App.tsx's onNewSession / TabProvider
-        // detects the change via sessionId effect and reconnects.
-        if (newSessionId) {
-          console.log(`[Chat] Channel-bound new conversation: ${sessionId.slice(0, 8)} → ${newSessionId.slice(0, 8)}`);
-          await resetSession();
-          return;
-        }
-      } catch (err) {
-        console.error('[Chat] Channel surface migration failed, falling back to plain reset:', err);
-        toastRef.current.error('Channel 重绑失败，已就地重置');
-      }
+    if (surfaces.channel && sessionId) {
+      await newSessionKeepingBinding();
+      return;
     }
 
     if (onNewSession) {
@@ -2742,7 +2763,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     } else {
       console.error('[Chat] Failed to start new session');
     }
-  }, [onNewSession, resetSession, surfaces.channel, sessionId]);
+  }, [onNewSession, resetSession, surfaces.channel, sessionId, newSessionKeepingBinding]);
 
   return (
     <div className="relative flex h-full flex-row overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)]">
@@ -2777,18 +2798,35 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               <>
                 <span className="flex-shrink-0 text-[var(--ink-subtle)]">/</span>
                 <SessionTitleEditor
+                  ref={titleEditorRef}
                   title={sessionTitle}
                   onRename={(newTitle) => onRenameSession?.(newTitle)}
                 />
               </>
             )}
-            {/* Surface tags (channel/cron pill) + handover button (PRD 0.2.14) */}
-            <SessionSurfaceTags
-              channel={surfaces.channel}
-              cron={surfaces.cron}
-              onHandoverClick={handleHandoverClick}
-              canHandover={canHandover}
-            />
+            {/* Surface tags (channel/cron pill) — display-only since the menu owns actions */}
+            <SessionSurfaceTags channel={surfaces.channel} cron={surfaces.cron} />
+            {/* Session ⋯ menu — rename/favorite/export/stats/bot binding/delete */}
+            {sessionId && agentDir && (
+              <SessionMenuButton
+                sessionId={sessionId}
+                sessionTitle={sessionTitle ?? '此对话'}
+                workspacePath={agentDir}
+                boundChannel={surfaces.channel}
+                availableChannels={availableHandoverChannels}
+                cronProtected={surfaces.cron?.status === 'running'}
+                favorite={!!sessionMeta?.favorite}
+                // The inline editor only mounts once a session has a real
+                // title (see the `sessionTitle && sessionTitle !== 'New Tab' …`
+                // gate above). Mirror that condition here so the menu's
+                // 重命名 row reflects whether the editor exists to open.
+                canRename={!!sessionTitle && sessionTitle !== 'New Tab' && sessionTitle !== 'New Chat'}
+                onOpenRename={() => titleEditorRef.current?.openRename()}
+                onFavoriteChanged={(_, updated) => { if (updated) setSessionMeta(updated); }}
+                onDeleted={handleNewSession}
+                onNewSessionKeepingBinding={newSessionKeepingBinding}
+              />
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {/* New Session button - before History */}
@@ -2824,16 +2862,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onClose={() => setShowHistory(false)}
               triggerRef={historyBtnRef}
             />
-            {/* Handover popover (PRD 0.2.14) — triggered by 📤 in surface tag area */}
-            {handoverAnchorEl && sessionId && agentDir && (
-              <HandoverPopover
-                sessionId={sessionId}
-                workspacePath={agentDir}
-                candidates={availableHandoverChannels}
-                anchorEl={handoverAnchorEl}
-                onClose={() => setHandoverAnchorEl(null)}
-              />
-            )}
             {/* Dev-only buttons - controlled by config.showDevTools */}
             {config.showDevTools && (
               <>
