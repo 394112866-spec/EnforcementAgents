@@ -121,7 +121,15 @@ pub fn show_with_navigation<R: Runtime>(
     body: &str,
     tab_id: Option<String>,
 ) {
-    let silent = !read_notification_sound_pref();
+    let prefs = read_notification_prefs();
+    if !prefs.os_notifications {
+        ulog_debug!(
+            "[Notification] Suppressed by user preference (osNotifications=false): title='{}'",
+            title
+        );
+        return;
+    }
+    let silent = !prefs.notification_sound;
     ulog_debug!(
         "[Notification] Showing toast title='{}' tab_id={:?} silent={}",
         title,
@@ -201,30 +209,38 @@ fn default_sound_name() -> Option<&'static str> {
     Some("message-new-instant")
 }
 
-/// Disk-first read of the `notificationSound` user preference.
+/// User notification preferences read from `~/.myagents/config.json`.
 ///
-/// Defaults to `true` (sound on) when the config file is missing or
-/// unparseable — fail-open: a missed sound is better than the appearance
-/// that notifications stopped working entirely. Read overhead is negligible:
+/// Both fields default to `true` (fail-open) when the config file is missing
+/// or unparseable — silently disabling notifications because we couldn't read
+/// a JSON file would look like a regression. Read overhead is negligible:
 /// notifications are low-frequency events, and the file is small.
-fn read_notification_sound_pref() -> bool {
+struct NotificationPrefs {
+    /// Master switch: when false, no OS notification is rendered at all
+    /// (covers all 6 trigger sites — cron / task / message complete /
+    /// permission request / ask-user-question / plan-mode review).
+    os_notifications: bool,
+    /// Sound flag: when true, the platform default chime plays alongside
+    /// the toast.
+    notification_sound: bool,
+}
+
+fn read_notification_prefs() -> NotificationPrefs {
     #[derive(Debug, serde::Deserialize, Default)]
     #[serde(rename_all = "camelCase")]
     struct PartialAppConfig {
+        os_notifications: Option<bool>,
         notification_sound: Option<bool>,
     }
 
-    let Some(home) = dirs::home_dir() else {
-        return true;
-    };
-    let config_path = home.join(".myagents").join("config.json");
-    let Ok(content) = std::fs::read_to_string(&config_path) else {
-        return true;
-    };
-    serde_json::from_str::<PartialAppConfig>(strip_bom(&content))
-        .ok()
-        .and_then(|c| c.notification_sound)
-        .unwrap_or(true)
+    let parsed: Option<PartialAppConfig> = dirs::home_dir()
+        .and_then(|home| std::fs::read_to_string(home.join(".myagents").join("config.json")).ok())
+        .and_then(|content| serde_json::from_str(strip_bom(&content)).ok());
+
+    NotificationPrefs {
+        os_notifications: parsed.as_ref().and_then(|c| c.os_notifications).unwrap_or(true),
+        notification_sound: parsed.and_then(|c| c.notification_sound).unwrap_or(true),
+    }
 }
 
 /// Direct WinRT toast with `on_activated` click handler. Compiled only on

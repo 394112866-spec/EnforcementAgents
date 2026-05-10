@@ -2754,18 +2754,18 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     </div>
                                     <button
                                         onClick={() => {
-                                            updateConfig({ cronNotifications: !config.cronNotifications });
-                                            toast.success(config.cronNotifications ? '已关闭任务通知' : '已开启任务通知');
+                                            updateConfig({ osNotifications: !config.osNotifications });
+                                            toast.success(config.osNotifications ? '已关闭通知' : '已开启通知');
                                         }}
                                         className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
-                                            config.cronNotifications
+                                            config.osNotifications
                                                 ? 'bg-[var(--accent)]'
                                                 : 'bg-[var(--line-strong)]'
                                         }`}
                                     >
                                         <span
                                             className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
-                                                config.cronNotifications ? 'translate-x-5' : 'translate-x-0'
+                                                config.osNotifications ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
                                     </button>

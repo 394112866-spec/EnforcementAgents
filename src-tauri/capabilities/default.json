@@ -51,6 +51,7 @@
     "updater:allow-check",
     "updater:allow-download-and-install",
     "process:allow-restart",
+    "notification:allow-is-permission-granted",
     "autostart:default",
     "autostart:allow-is-enabled",
     "autostart:allow-enable",
