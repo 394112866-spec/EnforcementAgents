@@ -50,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
+use crate::utils::bom::strip_bom;
 use crate::{ulog_debug, ulog_info, ulog_warn};
 #[cfg(target_os = "windows")]
 use crate::ulog_error;
@@ -104,6 +105,13 @@ pub struct NotificationClickPayload {
 /// Tauri event and routes to that tab via the existing `handleSelectTab`
 /// pipeline.
 ///
+/// Sound is gated by the `notificationSound` user preference, read disk-first
+/// from `~/.myagents/config.json` (defaults to enabled if missing). The
+/// preference flows through to the platform-specific sound API:
+///   - Windows: `Toast::sound(None)` for silent, `Sound::Default` for default.
+///   - macOS: `NSUserNotificationDefaultSoundName` (default mac chime).
+///   - Linux: `message-new-instant` (XDG sound theme; widely supported).
+///
 /// Best-effort: any OS-level failure is logged but never propagated to the
 /// caller — a silent notification is strictly better than failing the cron
 /// task / chat turn that triggered it.
@@ -113,16 +121,18 @@ pub fn show_with_navigation<R: Runtime>(
     body: &str,
     tab_id: Option<String>,
 ) {
+    let silent = !read_notification_sound_pref();
     ulog_debug!(
-        "[Notification] Showing toast title='{}' tab_id={:?}",
+        "[Notification] Showing toast title='{}' tab_id={:?} silent={}",
         title,
-        tab_id
+        tab_id,
+        silent
     );
 
     #[cfg(target_os = "windows")]
     {
         // Pure closure-capture path — no global state, no consumer command.
-        if let Err(e) = show_windows_toast(app, title, body, tab_id) {
+        if let Err(e) = show_windows_toast(app, title, body, tab_id, silent) {
             ulog_error!(
                 "[Notification] WinRT toast rendering failed entirely: {}. \
                  Notification will not be displayed; click activation \
@@ -137,7 +147,7 @@ pub fn show_with_navigation<R: Runtime>(
     {
         // Render first; only stash on success. Stashing eagerly would let
         // failed renders pollute the latch for 30s.
-        if let Err(e) = show_via_plugin(app, title, body) {
+        if let Err(e) = show_via_plugin(app, title, body, silent) {
             ulog_warn!("[Notification] plugin-notification show failed: {}", e);
             return;
         }
@@ -148,16 +158,73 @@ pub fn show_with_navigation<R: Runtime>(
 }
 
 /// Render via the cross-platform `tauri-plugin-notification` builder API.
+///
+/// `plugin-notification`'s desktop backend (`notify-rust`) routes the `sound`
+/// field through to `mac-notification-sys` on macOS and the freedesktop
+/// notification spec's `sound-name` hint on Linux. Not calling `.sound()` at
+/// all on these platforms means notify-rust never sets the sound key, which
+/// produces a *silent* notification — that's why the silent path takes the
+/// no-op branch and the audible path needs an explicit name.
+#[cfg(not(target_os = "windows"))]
 fn show_via_plugin<R: Runtime>(
     app: &AppHandle<R>,
     title: &str,
     body: &str,
+    silent: bool,
 ) -> tauri_plugin_notification::Result<()> {
-    app.notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show()
+    let mut builder = app.notification().builder().title(title).body(body);
+    if !silent {
+        if let Some(sound_name) = default_sound_name() {
+            builder = builder.sound(sound_name);
+        }
+    }
+    builder.show()
+}
+
+/// Per-platform default sound identifier passed to `notify-rust`.
+///
+/// macOS: `NSUserNotificationDefaultSoundName` is the documented sentinel for
+/// "play the system's default notification chime" (see Apple's
+/// NSUserNotification docs). `mac-notification-sys` recognizes any other
+/// string as a custom sound name (e.g. "Ping", "Blow") in `/System/Library/Sounds/`.
+///
+/// Linux: `message-new-instant` is part of the freedesktop sound theme spec
+/// and is supported by GNOME / KDE / XFCE / Cinnamon notification daemons.
+/// Notification daemons that don't understand it fall back to no sound.
+#[cfg(target_os = "macos")]
+fn default_sound_name() -> Option<&'static str> {
+    Some("NSUserNotificationDefaultSoundName")
+}
+
+#[cfg(target_os = "linux")]
+fn default_sound_name() -> Option<&'static str> {
+    Some("message-new-instant")
+}
+
+/// Disk-first read of the `notificationSound` user preference.
+///
+/// Defaults to `true` (sound on) when the config file is missing or
+/// unparseable — fail-open: a missed sound is better than the appearance
+/// that notifications stopped working entirely. Read overhead is negligible:
+/// notifications are low-frequency events, and the file is small.
+fn read_notification_sound_pref() -> bool {
+    #[derive(Debug, serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct PartialAppConfig {
+        notification_sound: Option<bool>,
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return true;
+    };
+    let config_path = home.join(".myagents").join("config.json");
+    let Ok(content) = std::fs::read_to_string(&config_path) else {
+        return true;
+    };
+    serde_json::from_str::<PartialAppConfig>(strip_bom(&content))
+        .ok()
+        .and_then(|c| c.notification_sound)
+        .unwrap_or(true)
 }
 
 /// Direct WinRT toast with `on_activated` click handler. Compiled only on
@@ -176,13 +243,14 @@ fn show_windows_toast<R: Runtime>(
     title: &str,
     body: &str,
     tab_id: Option<String>,
+    silent: bool,
 ) -> tauri_winrt_notification::Result<()> {
     use tauri_winrt_notification::Toast;
 
     let primary_app_id = resolve_windows_app_id(app);
     let primary_is_powershell = primary_app_id == Toast::POWERSHELL_APP_ID;
 
-    match build_and_show_toast(app, &primary_app_id, title, body, tab_id.clone()) {
+    match build_and_show_toast(app, &primary_app_id, title, body, tab_id.clone(), silent) {
         Ok(()) => Ok(()),
         Err(e) if primary_is_powershell => Err(e),
         Err(e) => {
@@ -192,7 +260,7 @@ fn show_windows_toast<R: Runtime>(
                 primary_app_id,
                 e
             );
-            build_and_show_toast(app, Toast::POWERSHELL_APP_ID, title, body, tab_id)
+            build_and_show_toast(app, Toast::POWERSHELL_APP_ID, title, body, tab_id, silent)
         }
     }
 }
@@ -204,14 +272,20 @@ fn build_and_show_toast<R: Runtime>(
     title: &str,
     body: &str,
     tab_id: Option<String>,
+    silent: bool,
 ) -> tauri_winrt_notification::Result<()> {
-    use tauri_winrt_notification::{Duration as ToastDuration, Toast};
+    use tauri_winrt_notification::{Duration as ToastDuration, Sound, Toast};
 
     let app_handle = app.clone();
+    // `Sound::Default` produces an empty `<audio>` element — WinRT then plays
+    // the toast template's default chime. `None` injects `<audio silent="true"/>`,
+    // suppressing sound entirely.
+    let sound = if silent { None } else { Some(Sound::Default) };
     Toast::new(app_id)
         .title(title)
         .text1(body)
         .duration(ToastDuration::Short)
+        .sound(sound)
         .on_activated(move |_action| {
             // _action is non-empty only when an action button is clicked;
             // we don't render buttons, so any activation is the toast body.

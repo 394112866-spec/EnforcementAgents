@@ -323,6 +323,7 @@ export interface AppConfig {
   // General settings
   autoStart: boolean; // 开机启动
   cronNotifications: boolean; // 定时任务通知
+  notificationSound: boolean; // 通知提醒声音（OS 通知是否播放声音）
   // API Keys for providers (stored separately for security)
   providerApiKeys?: Record<string, string>;
   // Provider verification status (persisted after API key validation)
@@ -1001,4 +1002,5 @@ export const DEFAULT_CONFIG: AppConfig = {
   showDevTools: false,
   autoStart: false,       // 默认不开启开机启动
   cronNotifications: true,
+  notificationSound: true, // 默认开启通知声音
 };
