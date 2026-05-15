@@ -496,13 +496,29 @@ async function collectCodexDiagnostics(
       'app/list', { threadId }),
   ]);
 
-  // Process auth
+  // Process auth.
+  //
+  // `requiresOpenaiAuth` is a **meta** flag — it means "this Codex product needs
+  // OpenAI-backed auth to work" (true for all current Codex builds backed by
+  // ChatGPT/OpenAI). It is NOT a per-user state. A logged-in user with a
+  // working ChatGPT account also sees `requiresOpenaiAuth: true`.
+  // Live probe of a healthy logged-in user returns:
+  //   { authMethod: "chatgpt", authToken: null, requiresOpenaiAuth: true }
+  // The user-state signal is `authMethod`: null ⇒ no credential of any kind
+  // (apikey / chatgpt / chatgptAuthTokens / agentIdentity), so the user must
+  // sign in. Earlier code derived requiresLogin from `requiresOpenaiAuth`
+  // alone, which flagged every authed Codex user as needing login — surfacing
+  // a false-positive "需要登录 Codex" banner in MyAgents (cross-bugfix #1).
   let auth: RuntimeAuthStatus | undefined;
   if (authR[0] === 'ok') {
     status.auth = 'ok';
+    const hasAuth = !!authR[1].authMethod;
     auth = {
       authMethod: authR[1].authMethod,
-      requiresLogin: authR[1].requiresOpenaiAuth === true,
+      // Treat the meta flag as a gate: even if `authMethod` is null, login is
+      // only "required" when the Codex build actually needs OpenAI auth.
+      // (Defensive — Codex could ship a build mode where neither is required.)
+      requiresLogin: !hasAuth && authR[1].requiresOpenaiAuth === true,
     };
   } else if (authR[0] === 'unsupported') {
     status.auth = 'unsupported';
