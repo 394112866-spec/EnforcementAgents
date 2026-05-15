@@ -121,6 +121,54 @@ export function augmentedProcessEnv(
 }
 
 /**
+ * Read `agent.runtimeConfig.envPolicy` from disk for a workspace, validate the
+ * `proxy` literal against the explicit allowlist, and return a clean
+ * `RuntimeEnvPolicy` (or `undefined` when nothing is set).
+ *
+ * Validation is mandatory at every entry point that reaches `augmentedProcessEnv`
+ * via this disk source — without it, a malformed `proxy: 'inherit'` typo would
+ * propagate to the diagnostic surface as if it were valid, and the user has no
+ * way to discover the misconfiguration. `augmentedProcessEnv` itself does
+ * defense-in-depth (unknown → `myagents`), so behaviour stays safe, but the
+ * visible mismatch is confusing.
+ *
+ * Best-effort: any error reading config is swallowed and returns `undefined`,
+ * so the caller path can't break on a malformed `agent.json`.
+ *
+ * Used by `external-session.ts` (live session start) and `admin-api.ts`
+ * (CLI `runtime diagnose` handler) — keep them in lockstep by funnelling
+ * through this one helper.
+ */
+export async function resolveAgentEnvPolicy(
+  workspacePath: string,
+): Promise<RuntimeEnvPolicy | undefined> {
+  try {
+    const { findAgentByWorkspacePath } = await import('../utils/admin-config');
+    const agent = findAgentByWorkspacePath(workspacePath);
+    const raw = (agent?.runtimeConfig as Record<string, unknown> | undefined)?.envPolicy;
+    if (!raw || typeof raw !== 'object') return undefined;
+    const policyObj = raw as Record<string, unknown>;
+    const proxyRaw = policyObj.proxy;
+    const proxy: 'myagents' | 'terminal' | 'direct' | undefined =
+      proxyRaw === 'myagents' || proxyRaw === 'terminal' || proxyRaw === 'direct'
+        ? proxyRaw
+        : undefined;
+    if (proxyRaw !== undefined && proxy === undefined) {
+      console.warn(
+        `[env-utils] Ignoring invalid envPolicy.proxy=${JSON.stringify(proxyRaw)} for ${workspacePath} — defaulting to 'myagents'`,
+      );
+    }
+    return { proxy };
+  } catch (err) {
+    console.warn(
+      `[env-utils] resolveAgentEnvPolicy(${workspacePath}) failed:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return undefined;
+  }
+}
+
+/**
  * Resolve an external CLI command to its full executable path.
  *
  * Uses our local `which()` with the augmented PATH (from `getShellPath()`)

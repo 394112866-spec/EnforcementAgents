@@ -3001,14 +3001,15 @@ export async function handleRuntimeDiagnose(payload: {
   // policy the real session would use (Codex review #3 catch — without this,
   // CLI diagnose silently reports the legacy `myagents` view even when the
   // agent is configured to inherit terminal or skip proxy entirely).
-  let envPolicy: import('../shared/types/runtime').RuntimeEnvPolicy | undefined;
-  if (payload.workspacePath) {
-    const agent = findAgentByWorkspacePath(payload.workspacePath);
-    const raw = (agent?.runtimeConfig as Record<string, unknown> | undefined)?.envPolicy;
-    if (raw && typeof raw === 'object') {
-      envPolicy = raw as import('../shared/types/runtime').RuntimeEnvPolicy;
-    }
-  }
+  //
+  // Funnel through the shared helper in `env-utils.ts` so this path validates
+  // the `proxy` literal the same way `external-session.ts` does — without
+  // shared validation, a malformed `envPolicy.proxy` on disk would silently
+  // appear as `'myagents'` in the diagnostic banner, hiding the misconfig.
+  const { resolveAgentEnvPolicy } = await import('./runtimes/env-utils');
+  const envPolicy = payload.workspacePath
+    ? await resolveAgentEnvPolicy(payload.workspacePath)
+    : undefined;
 
   try {
     const rt = getExternalRuntime('codex');

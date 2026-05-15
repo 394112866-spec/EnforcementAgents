@@ -824,41 +824,16 @@ export function getLastExternalAssistantText(): string {
 }
 
 /**
- * Resolve the agent's envPolicy from disk (issue #194). Returns `undefined` when
- * the agent has none set — the runtime adapter then defaults to the legacy
- * `{ proxy: 'myagents' }` behaviour. Best-effort: any error reading config is
- * swallowed and returns undefined, so the start path can't break on a malformed
- * agent.json.
+ * Resolve the agent's envPolicy from disk. Thin wrapper over the shared
+ * helper in `env-utils.ts` — kept as a local re-export so existing call
+ * sites in this file stay 1-line. See `env-utils.resolveAgentEnvPolicy` for
+ * validation contract.
  */
 async function resolveAgentEnvPolicy(
   workspacePath: string,
 ): Promise<import('../../shared/types/runtime').RuntimeEnvPolicy | undefined> {
-  try {
-    const { findAgentByWorkspacePath } = await import('../utils/admin-config');
-    const agent = findAgentByWorkspacePath(workspacePath);
-    const raw = (agent?.runtimeConfig as Record<string, unknown> | undefined)?.envPolicy;
-    if (!raw || typeof raw !== 'object') return undefined;
-    // Validate proxy field against the explicit allowlist. A malformed value
-    // (e.g. `proxy: 'inherit'` from a typo, or `proxy: true` from a wrong UI
-    // wire) must NOT fall through to the env-utils branch that strips proxy
-    // vars — that would degrade the user from 'myagents' (safe) to 'direct'
-    // (silently breaks proxy-dependent traffic). Codex review #5 catch:
-    // unknown strings used to fall through to the 'terminal' arm after the
-    // env stripped MyAgents' proxy.
-    const policyObj = raw as Record<string, unknown>;
-    const proxyRaw = policyObj.proxy;
-    const proxy: 'myagents' | 'terminal' | 'direct' | undefined =
-      proxyRaw === 'myagents' || proxyRaw === 'terminal' || proxyRaw === 'direct'
-        ? proxyRaw
-        : undefined;
-    if (proxyRaw !== undefined && proxy === undefined) {
-      console.warn(`[external-session] Ignoring invalid envPolicy.proxy=${JSON.stringify(proxyRaw)} for ${workspacePath} — defaulting to 'myagents'`);
-    }
-    return { proxy };
-  } catch (err) {
-    console.warn(`[external-session] resolveAgentEnvPolicy(${workspacePath}) failed:`, err instanceof Error ? err.message : String(err));
-  }
-  return undefined;
+  const { resolveAgentEnvPolicy: shared } = await import('./env-utils');
+  return shared(workspacePath);
 }
 
 /**

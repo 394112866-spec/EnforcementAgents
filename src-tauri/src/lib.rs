@@ -501,11 +501,21 @@ pub fn run() {
             // original config field was effectively a no-op).
             .on_navigation(|url: &Url| {
                 let scheme = url.scheme();
-                // Tauri-internal / renderer-internal schemes: always allow.
+                // Tauri-internal schemes: always allow.
                 // - tauri / ipc: Tauri 2.x core IPC bridges
                 // - asset: tauri-plugin-fs asset serving
                 // - myagents / myagents-internal: app's custom protocols
-                // - about / blob / data: renderer-side internal URLs
+                //
+                // SECURITY: `data:` / `blob:` / `about:` are intentionally NOT
+                // in the top-frame allowlist. A `data:text/html,<script>…` URL
+                // navigated at top-frame would replace the entire app with
+                // attacker-controlled HTML running in the privileged renderer
+                // origin (full access to Tauri IPC). These schemes are still
+                // usable inside iframes / <img> / <video> (where on_navigation
+                // doesn't fire) — only top-frame replacement is blocked here.
+                // Right-click "Open Link" from WebKit's native context menu on
+                // such an anchor would otherwise bypass `LinkContextMenuProvider`
+                // (which only intercepts http/https/mailto).
                 if matches!(
                     scheme,
                     "tauri"
@@ -513,9 +523,6 @@ pub fn run() {
                         | "asset"
                         | "myagents"
                         | "myagents-internal"
-                        | "about"
-                        | "blob"
-                        | "data"
                 ) {
                     return true;
                 }

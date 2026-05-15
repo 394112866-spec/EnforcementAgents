@@ -545,10 +545,24 @@ async function collectCodexDiagnostics(
         authStatusStr = typeof obj.status === 'string' ? obj.status :
                         typeof obj.kind === 'string' ? obj.kind : undefined;
       }
+      // Derive `state` from authStatus so the diagnostic banner has a single
+      // field to filter on (its existing `state === 'failed'` check would
+      // never fire if we only populated authStatus). Known unhealthy markers
+      // — explicit failure plus auth-required states the user must act on —
+      // surface as 'failed' so the banner highlights them.
+      const lowered = authStatusStr?.toLowerCase() ?? '';
+      const unhealthy =
+        lowered.includes('failed') ||
+        lowered.includes('error') ||
+        lowered.includes('oauth') ||
+        lowered.includes('unauthenticated') ||
+        lowered.includes('needs') ||
+        lowered.includes('required');
       return {
         name: s.name,
         toolCount: Object.keys(s.tools ?? {}).length,
         resourceCount: s.resources?.length ?? 0,
+        state: unhealthy ? 'failed' : undefined,
         authStatus: authStatusStr,
       };
     });
@@ -999,6 +1013,16 @@ export class CodexRuntime implements AgentRuntime {
             codexProc.threadId,
             options.envPolicy?.proxy ?? 'myagents',
           );
+          // Session-life gate: tab close / runtime teardown can race against
+          // the 5–10s diagnostic fan-out. Without this guard, a diagnostic
+          // resolving after the user switched tabs would broadcast into the
+          // already-torn-down session — TabProvider's setRuntimeDiagnostics(null)
+          // on session switch protects the NEXT session, but the stale event
+          // can still flash into the switched-away tab if SSE flushes faster
+          // than React commit.
+          if (codexProc.exited || codexProc.intentionalKillDuringStartup) {
+            return;
+          }
           wrappedOnEvent({ kind: 'runtime_diagnostics', diagnostics });
         } catch (err) {
           // collectCodexDiagnostics already degrades per-call; reaching here

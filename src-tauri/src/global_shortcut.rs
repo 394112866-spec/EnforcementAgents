@@ -232,15 +232,38 @@ pub fn register<R: Runtime>(app: &AppHandle<R>, accelerator: &str) -> Result<(),
     let shortcut = parse_accelerator(accelerator)?;
     let gs = app.global_shortcut();
 
-    // Unregister whatever was active before (best-effort).
-    if let Some(prev) = CURRENT_ACCELERATOR.lock().ok().and_then(|m| m.clone()) {
-        if let Ok(prev_shortcut) = parse_accelerator(&prev) {
+    // Capture the previous accelerator BEFORE touching the OS — if the new
+    // registration fails, we leave it untouched. Previously we
+    // unregistered-old THEN register-new; a failure mid-sequence orphaned
+    // the user (old gone, new not installed) and the renderer's optimistic
+    // settings UI reverted state but the OS state was "no shortcut".
+    let prev: Option<String> = CURRENT_ACCELERATOR.lock().ok().and_then(|m| m.clone());
+
+    // Same chord re-register is a no-op at the OS level: unregister then
+    // re-register so the duplicate-registration error doesn't propagate.
+    if prev.as_deref() == Some(accelerator) {
+        if let Ok(prev_shortcut) = parse_accelerator(accelerator) {
+            let _ = gs.unregister(prev_shortcut);
+        }
+        gs.register(shortcut)
+            .map_err(|e| format!("注册失败: {}", e))?;
+        // CURRENT_ACCELERATOR already points to this accel; no state change.
+        ulog_info!("[global-shortcut] re-registered '{}'", accelerator);
+        return Ok(());
+    }
+
+    // Different chord: install the new one first. Only on success do we
+    // tear down the previous registration — that way a failed register
+    // leaves the OS state unchanged and the renderer's "previous accel
+    // still works" assumption holds.
+    gs.register(shortcut)
+        .map_err(|e| format!("注册失败: {}", e))?;
+
+    if let Some(prev_str) = prev.as_deref() {
+        if let Ok(prev_shortcut) = parse_accelerator(prev_str) {
             let _ = gs.unregister(prev_shortcut);
         }
     }
-
-    gs.register(shortcut)
-        .map_err(|e| format!("注册失败: {}", e))?;
 
     if let Ok(mut guard) = CURRENT_ACCELERATOR.lock() {
         *guard = Some(accelerator.to_string());
