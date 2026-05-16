@@ -165,7 +165,11 @@ export default function GlobalPluginsPanel({
         loadList(); // resync — optimistic state was wrong
         return;
       }
-      toastRef.current.success(item.enabled ? `已禁用 ${item.name}` : `已启用 ${item.name}`);
+      toastRef.current.success(
+        item.enabled
+          ? `已隐藏 ${item.name}（各工作区不再可选）`
+          : `已显示 ${item.name}（可在 Agent / Chat 工具菜单里勾选启用）`,
+      );
     } catch (err) {
       console.error('[GlobalPluginsPanel] toggle failed:', err);
       toastRef.current.error('切换失败');
@@ -231,7 +235,10 @@ export default function GlobalPluginsPanel({
             Claude 插件 (skills + agents + hooks + MCP) — 来自 GitHub 或本地目录
           </p>
           <p className="mt-1 text-xs text-[var(--ink-muted)]">
-            ⓘ 仅作用于 MyAgents 自带 Runtime。如果工作区切换到 Claude Code / Codex / Gemini 等外部 Runtime，请在该 CLI 内用 <code className="font-mono text-[11px]">/plugin</code> 管理插件。
+            ⓘ 这里的开关只决定插件「<b>是否在各工作区里出现</b>」。要实际在某个 Agent / 工作区里启用，请去 Agent 设置面板的「插件」一项，或在 Chat 输入框 ➜ 工具菜单 ➜ 插件子菜单里勾选。
+          </p>
+          <p className="mt-1 text-xs text-[var(--ink-muted)]">
+            ⓘ 仅作用于 MyAgents 自带 Runtime。外部 Runtime (Claude Code / Codex / Gemini) 请在该 CLI 内用 <code className="font-mono text-[11px]">/plugin</code> 管理。
           </p>
         </div>
         <button
@@ -350,7 +357,7 @@ function PluginCard({
                 ? 'bg-[var(--accent)]'
                 : 'bg-[var(--border)]'
             } ${isBad ? 'opacity-50 cursor-not-allowed' : ''}`}
-            title={item.enabled ? '禁用插件' : '启用插件'}
+            title={item.enabled ? '隐藏（不在工作区里出现）' : '显示（可被工作区选择）'}
           >
             <span
               className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${

@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.17] - 2026-05-16
 
-> 接入 Anthropic Claude Plugin 协议：用户能从 GitHub URL / 直链 zip / 本地路径一键安装单个插件（自带 skills + agents + MCP + hooks 的目录），在设置页独立 Plugins Tab 启停。运行时由 Claude Agent SDK 自动展开组件，MyAgents 只管目录生命周期 + 启停状态。
+> 接入 Anthropic Claude Plugin 协议：用户能从 GitHub URL / 直链 zip / 本地路径一键安装单个插件（自带 skills + agents + MCP + hooks 的目录）。**启用模型对齐 MCP**：Settings 面板的开关只决定「在各工作区是否可见」，实际启用通过 Agent 设置面板的「插件」行或 Chat 输入框工具菜单的「插件」子菜单按工作区精细控制。运行时由 Claude Agent SDK 自动展开组件，MyAgents 只管目录生命周期 + 启停状态。
 
 ### Added
 
-- **设置页新增「插件 Plugins」Tab**：与技能 / 工具 MCP / 聊天机器人并列。列表显示插件名 / 版本 / 描述 / 状态（启用/禁用/⚠ 异常），点开看 manifest + 组件清单（skills/agents/hooks/MCP/LSP/monitors 数量）。右上角「安装插件」弹窗支持 `owner/repo`、完整 GitHub URL、直链 `.zip`、`file:///` 本地目录四种来源。
+- **设置页新增「插件 Plugins」Tab**：与技能 / 工具 MCP / 聊天机器人并列。列表显示插件名 / 版本 / 描述 / 状态（已显示/已隐藏/⚠ 异常），点开看 manifest + 组件清单（skills/agents/hooks/MCP/LSP/monitors 数量）。右上角「安装插件」弹窗支持 `owner/repo`、完整 GitHub URL、直链 `.zip`、`file:///` 本地目录四种来源。**开关只决定「在工作区里是否可见为候选」**——实际启用走下面两个新入口。
+- **Chat 输入框「工具」菜单新增「插件 Plugins」子菜单**：与已有的 MCP 列表同级。列出所有 Settings 已显示的插件，每个一个 toggle。勾选后该插件**对当前工作区**生效（写入 Agent 配置 + 推送给 sidecar 立即生效）。如果插件自带 MCP server，副标题会标示「🔌 N 个 MCP: foo, bar」让用户知道启用后会自动加载哪些工具。
+- **Agent 设置面板（基础设置 → 工具）新增「插件 Plugins」一行**：复用 MCP 工具卡片样式（多选 checkbox），写入 `Agent.enabledPluginIds`。与 Chat 输入框的子菜单是**同一份持久化状态**，两个 UI surface 任改一个，另一个同步显示。
 - **CLI `myagents cc-plugin` 子命令族**：`list / install / uninstall / enable / disable / show`。区别于已有的 `myagents plugin`（OpenClaw IM 渠道插件），`cc-plugin` 专管 Claude 协议插件。`myagents cc-plugin install anthropics/example-plugin` 一键装，`myagents cc-plugin disable foo` 立即禁用。
 - **SDK Options.plugins 注入**：builtin runtime 在每次构建 `query()` 选项时把启用的插件路径透传给 SDK，由 SDK 自动加载插件内 skills/agents/MCP/hooks。新安装/启停后通过现有 `scheduleDeferredRestart` + `schedulePreWarm` 柔性接入（500ms 防抖），不影响进行中的对话。
 - **`~/.myagents/plugins/` 目录管理**：每个插件落到 `~/.myagents/plugins/<name>/`，跨版本可写数据存 `~/.myagents/plugins/data/<id>/`（对应 SDK 的 `${CLAUDE_PLUGIN_DATA}`）。启动时幂等创建目录。

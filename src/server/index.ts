@@ -6989,17 +6989,74 @@ async function main() {
           if (typeof body.enabled !== 'boolean') {
             return jsonResponse({ success: false, error: 'enabled 参数必填 (boolean)' }, 400);
           }
+          // NOTE: this endpoint toggles the GLOBAL VISIBILITY gate
+          // (AppConfig.enabledPlugins). It does NOT activate the plugin in
+          // any workspace — per-workspace activation goes through
+          // /api/cc-plugin/workspace-enable below. Settings panel uses
+          // this; chat input / Agent settings use workspace-enable.
           const { entry, enabled } = await togglePlugin(body.id, body.enabled);
           broadcast('plugins:changed', { reason: 'toggle' });
+          // Restart in case the toggle hid a plugin currently injected via
+          // session override / Agent default — store filter skips it on
+          // next options build.
           await schedulePluginRestartLazy();
           return jsonResponse({ success: true, entry, enabled });
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Toggle failed';
           const status = error instanceof PluginStoreError ? error.statusCode : 500;
           if (status >= 500) {
-            console.error('[api/plugin/toggle] Error:', error);
+            console.error('[api/cc-plugin/toggle] Error:', error);
           }
           return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/cc-plugin/workspace-enable - body { workspacePath, enabledIds[] }
+      // Sets the per-workspace plugin enable list (stored on Agent.enabledPluginIds).
+      // Single source of truth shared by the Agent settings panel and the chat
+      // input "插件" submenu — both UIs call this, then push to the active
+      // sidecar via /api/cc-plugin/session-enable to take immediate effect.
+      if (pathname === '/api/cc-plugin/workspace-enable' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { workspacePath?: string; enabledIds?: string[] };
+          if (!body.workspacePath || typeof body.workspacePath !== 'string') {
+            return jsonResponse({ success: false, error: 'workspacePath 参数必填' }, 400);
+          }
+          if (!Array.isArray(body.enabledIds)) {
+            return jsonResponse({ success: false, error: 'enabledIds 必须是 string[]' }, 400);
+          }
+          const ids = body.enabledIds.filter((s): s is string => typeof s === 'string');
+          const { setWorkspaceEnabledPlugins } = await import('./plugins/store');
+          const result = await setWorkspaceEnabledPlugins(body.workspacePath, ids);
+          broadcast('plugins:changed', { reason: 'workspace-enable' });
+          return jsonResponse({ success: true, ...result });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Workspace enable failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          console.error('[api/cc-plugin/workspace-enable] Error:', error);
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/cc-plugin/session-enable - body { enabledIds[] | null }
+      // Push a per-Tab override to THIS sidecar (the current session). null
+      // clears the override back to Agent-default tracking. Triggers a
+      // deferred restart so the next pre-warm picks up the new plugin set.
+      if (pathname === '/api/cc-plugin/session-enable' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { enabledIds?: string[] | null };
+          const ids = body.enabledIds === null || body.enabledIds === undefined
+            ? null
+            : Array.isArray(body.enabledIds)
+              ? body.enabledIds.filter((s): s is string => typeof s === 'string')
+              : null;
+          const { setSessionEnabledPluginIds } = await import('./agent-session');
+          setSessionEnabledPluginIds(ids);
+          return jsonResponse({ success: true, enabledIds: ids });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Session enable failed';
+          console.error('[api/cc-plugin/session-enable] Error:', error);
+          return jsonResponse({ success: false, error: message }, 500);
         }
       }
 

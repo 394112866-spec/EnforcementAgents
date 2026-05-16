@@ -208,6 +208,9 @@ export interface Project {
   // Workspace-level MCP enabled servers (IDs of globally enabled MCPs that are turned on for this workspace)
   // null/undefined = none enabled, array of IDs = those MCPs are enabled for this workspace
   mcpEnabledServers?: string[];
+  /** PRD 0.2.17 — Claude plugins enabled for this workspace (subset of globally
+   *  visible plugins). Mirrors mcpEnabledServers semantics exactly. */
+  enabledPluginIds?: string[];
   /** Internal projects (e.g. ~/.myagents diagnostic workspace) hidden from Launcher */
   internal?: boolean;
   /** Custom emoji icon for display, defaults to FolderOpen if absent */
@@ -386,6 +389,8 @@ export interface AppConfig {
     model?: string;
     permissionMode?: PermissionMode;
     mcpEnabledServers?: string[];
+    /** PRD 0.2.17 — last-selected plugin set in Launcher, restored on next open. */
+    enabledPluginIds?: string[];
   };
 
   // ===== Agent Configuration (v0.1.41) =====
@@ -396,9 +401,18 @@ export interface AppConfig {
    *  under ~/.myagents/plugins/<name>/ containing .claude-plugin/plugin.json.
    *  Disk is the source of truth; this is the index. */
   plugins?: import('./types/plugin').PluginEntry[];
-  /** Enable map keyed by PluginEntry.id ("<name>@local"). Missing key = disabled.
-   *  Format matches Claude Code's settings.json::enabledPlugins for forward
-   *  compatibility with future marketplace support. */
+  /** Global VISIBILITY gate keyed by PluginEntry.id ("<name>@local").
+   *  - `true`  → plugin appears in workspace/Agent plugin selectors as a candidate.
+   *  - missing / `false` → plugin is hidden from every workspace (effectively
+   *    "installed but quarantined"). Toggle lives in Settings → Plugins.
+   *
+   *  This is the OUTER layer of the two-layer model (mirrors MCP):
+   *  - Layer 1 (this field): "globally visible / quarantined"
+   *  - Layer 2 (Agent.enabledPluginIds / Project.enabledPluginIds / Tab session
+   *    state): "actually enabled for this specific context"
+   *
+   *  Format matches Claude Code's settings.json::enabledPlugins so future
+   *  marketplace support / cross-import doesn't drift. */
   enabledPlugins?: Record<string, boolean>;
   /** Reserved for future plugin.json::userConfig values (v0.2.18+). v0.2.17
    *  does not collect these via UI but the field is persisted so power users

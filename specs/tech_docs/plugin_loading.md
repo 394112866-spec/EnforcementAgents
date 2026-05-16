@@ -9,10 +9,13 @@
 
 ---
 
-## 边界（最重要的两句话）
+## 边界（最重要的三句话）
 
 1. **MyAgents 不解释插件内组件**。`SKILL.md` 的 frontmatter 字段、`hooks.json` 的 30+ 种事件、`.mcp.json` 的 server 配置、`${CLAUDE_PLUGIN_ROOT}` 替换——**全部交给 SDK**。MyAgents 只把绝对路径喂给 `Options.plugins`。
-2. **OpenClaw 的 `plugin` 和 Claude 的 `cc-plugin` 是两套独立体系**。前者是 IM 渠道 npm 包（飞书/微信适配器），存在 Rust Management API；后者是 Anthropic 协议的插件目录，存在 Node Sidecar 的 AppConfig + 磁盘。CLI 命名分别是 `myagents plugin *` vs `myagents cc-plugin *`，互不影响。
+2. **OpenClaw 的 `plugin` 和 Claude 的 `cc-plugin` 是两套独立体系**。前者是 IM 渠道 npm 包（飞书/微信适配器），存在 Rust Management API；后者是 Anthropic 协议的插件目录，存在 Node Sidecar 的 AppConfig + 磁盘。CLI 命名分别是 `myagents plugin *` vs `myagents cc-plugin *`，互不影响。HTTP 路径也分别是 `/api/plugin/*`（Rust）vs `/api/cc-plugin/*`（Node Sidecar），不会撞名。
+3. **两层启用模型，镜像 MCP**（PRD 0.2.17 重构）：
+   - Layer 1（全局可见性）：`AppConfig.enabledPlugins` —— Settings 面板的开关，OFF 则各工作区都看不到此 plugin（"安装但隐藏"）
+   - Layer 2（工作区启用）：`Agent.enabledPluginIds` / `Project.enabledPluginIds` —— 实际在该 Agent / 工作区被选用的子集。两个 UI surface 写入同一份：Agent 设置面板的「插件」行 + Chat 输入框工具菜单的「插件」子菜单
 
 ---
 
@@ -56,15 +59,30 @@ renderer InstallDialog → apiPostJson('/api/plugin/install', { sourceUrl, insta
               → 否则：abortPersistentSession() (下一次 pre-warm 拿到新 plugin 列表)
 ```
 
-### SDK 注入
+### SDK 注入（PRD 0.2.17 两层模型）
 
 ```
 agent-session.ts::commonQueryOptions 构建处
-  → getEnabledPluginSdkConfigs()           // 从 AppConfig 取 enabled & 存在的
+  ↓
+  determine contextEnabledIds:
+    if currentEnabledPluginIds !== null  → use per-Tab override (Layer 2)
+    else                                  → getDefaultEnabledPluginIdsForWorkspace(agentDir)
+                                            (Agent.enabledPluginIds, fallback Project)
+  ↓
+  getEnabledPluginSdkConfigs(contextEnabledIds)
+    Layer 1: filter by AppConfig.enabledPlugins[id] === true (visibility gate)
+    Layer 2: filter by contextEnabledIds (per-workspace enable)
+    Symlink-swap defense: lstat + realpath canonical check
     返回 [{ type: 'local', path: '/abs/path' }, ...]
-  → 注入到 Options.plugins
-  → SDK 自动展开 plugin 内组件，merge 到 skills/agents/mcpServers/hooks
+  ↓
+  Options.plugins 注入
+  ↓
+  SDK 自动展开 plugin 内组件，merge 到 skills/agents/mcpServers/hooks
 ```
+
+per-Tab override 设置：renderer 在 chat 输入框「插件」子菜单勾选 →
+`/api/cc-plugin/session-enable` → sidecar `setSessionEnabledPluginIds()`
+→ schedule restart → 下次 pre-warm 拿到新 plugin 列表。
 
 外部 Runtime（Claude Code CLI / Codex / Gemini）路径不走这里——它们各自管自己的 plugin 体系。
 

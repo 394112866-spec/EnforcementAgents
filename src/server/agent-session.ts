@@ -40,7 +40,10 @@ import { snapshotForImSession, snapshotForOwnedSession } from './utils/session-s
 import { findAgentByWorkspacePath } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
-import { getEnabledPluginSdkConfigs } from './plugins/store';
+import {
+  getEnabledPluginSdkConfigs,
+  getDefaultEnabledPluginIdsForWorkspace,
+} from './plugins/store';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { setAmbientLogContext, clearAmbientLogContextField } from './logger-context';
@@ -1535,6 +1538,45 @@ export function getCurrentMcpServers(): readonly McpServerDefinition[] | null {
 // so ensureSdkMcpInSync() can detect when the desired MCP set has drifted from the SDK's
 // live set (typically after IM context-injected MCPs become available post pre-warm).
 let frozenSdkMcpFingerprint = '';
+
+// PRD 0.2.17 — Claude plugin enabled IDs for this session/sidecar.
+//   - `null` (initial) → resolve via getDefaultEnabledPluginIdsForWorkspace(agentDir)
+//     on every options-build call. Lets Agent / Project config edits take
+//     effect on the next pre-warm without needing the renderer to push.
+//   - `string[]`       → explicit per-Tab override (renderer pushed via
+//     setSessionEnabledPluginIds). Bypasses the Agent default; clearing
+//     back to null restores Agent-tracking behaviour.
+//
+// Mirrors `currentMcpServers` / `currentAgentDefinitions` per-sidecar state.
+let currentEnabledPluginIds: string[] | null = null;
+
+/**
+ * Per-Tab UI override entry point. Renderer calls this when the user toggles
+ * a plugin in the chat input "插件" submenu — sets the override + schedules
+ * a deferred restart so the next session pre-warm picks up the new options.
+ *
+ * Pass `null` to clear the override and fall back to Agent default tracking.
+ */
+export function setSessionEnabledPluginIds(ids: string[] | null): void {
+  // Same-set short-circuit — avoids gratuitous restart when renderer
+  // re-emits the same list (e.g. after a settings refresh).
+  const current = currentEnabledPluginIds;
+  if (current === null && ids === null) return;
+  if (
+    current !== null &&
+    ids !== null &&
+    current.length === ids.length &&
+    current.every((id, i) => id === ids[i])
+  ) {
+    return;
+  }
+  currentEnabledPluginIds = ids === null ? null : [...ids];
+  forceReloadActiveSession('plugins');
+}
+
+export function getSessionEnabledPluginIds(): readonly string[] | null {
+  return currentEnabledPluginIds;
+}
 
 // Current sub-agent definitions (set per-query via /api/agents/set)
 // null = no agents configured, {} = explicitly set to none
@@ -7627,7 +7669,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Field omitted entirely when no plugins are enabled so empty-array
       // noise doesn't show up in SDK debug output.
       ...((): { plugins?: { type: 'local'; path: string }[] } => {
-        const pluginCfgs = getEnabledPluginSdkConfigs();
+        // Two-layer plugin resolution (mirrors MCP):
+        //   1. Per-session override (currentEnabledPluginIds, set via
+        //      setSessionEnabledPluginIds when the renderer toggles in the
+        //      chat input "插件" submenu)
+        //   2. Fallback: Agent.enabledPluginIds (or Project's) for this
+        //      workspace (agentDir)
+        // Layer 1 still applies the AppConfig.enabledPlugins global
+        // visibility gate inside getEnabledPluginSdkConfigs.
+        const contextIds = currentEnabledPluginIds !== null
+          ? currentEnabledPluginIds
+          : getDefaultEnabledPluginIdsForWorkspace(agentDir ?? '');
+        const pluginCfgs = getEnabledPluginSdkConfigs(contextIds);
         return pluginCfgs.length > 0 ? { plugins: pluginCfgs } : {};
       })(),
       // (v0.2.12) Enable --replay-user-messages so CLI emits SDKUserMessageReplay

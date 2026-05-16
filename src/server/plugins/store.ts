@@ -11,9 +11,10 @@
  * directly, but the separation makes test seams obvious).
  */
 
-import { join } from 'path';
-import { existsSync, renameSync, lstatSync, realpathSync } from 'fs';
+import { join, resolve } from 'path';
+import { existsSync, readFileSync, renameSync, lstatSync, realpathSync } from 'fs';
 import { randomUUID } from 'crypto';
+import { stripBom } from '../../shared/utils';
 
 import { withConfigLock, loadConfig, type AdminAppConfig } from '../utils/admin-config';
 import { getHomeDirOrNull } from '../utils/platform';
@@ -373,6 +374,50 @@ export async function uninstallPlugin(
 // Toggle
 // -----------------------------------------------------------------------------
 
+/**
+ * Set the per-workspace enable list (Agent.enabledPluginIds preferred;
+ * falls back to Project.enabledPluginIds if no Agent matches the path).
+ * Used by both the Agent settings panel and the chat-input "插件" submenu
+ * — single source of truth, two UI surfaces.
+ *
+ * Returns the final persisted list and which scope was written
+ * ('agent' | 'project' | 'none' if neither matched). Caller should also
+ * push to the active sidecar via setSessionEnabledPluginIds so changes
+ * take effect immediately.
+ */
+export async function setWorkspaceEnabledPlugins(
+  workspacePath: string,
+  enabledIds: string[],
+): Promise<{ scope: 'agent' | 'project' | 'none'; ids: string[] }> {
+  if (!workspacePath) {
+    throw new PluginStoreError('workspacePath 必填', 'INVALID_WORKSPACE', 400);
+  }
+  const dedup = Array.from(new Set(enabledIds));
+  let scope: 'agent' | 'project' | 'none' = 'none';
+  await withConfigLock(async cfg => {
+    // AdminAppConfig.agents is AgentConfigSlim[] but Slim's index signature
+    // accepts arbitrary keys, so adding enabledPluginIds is structurally
+    // fine — TS just can't narrow through the `as` cast cleanly. Cast via
+    // `unknown` to express "we know this field exists on AgentConfig".
+    const agents = cfg.agents ?? [];
+    const idx = agents.findIndex(a => a.workspacePath === workspacePath);
+    if (idx !== -1) {
+      const next = { ...cfg };
+      const newAgents = agents.slice();
+      newAgents[idx] = { ...agents[idx], enabledPluginIds: dedup } as typeof agents[number];
+      next.agents = newAgents;
+      scope = 'agent';
+      return next;
+    }
+    // No Agent — falling through to none (Project lives in projects.json,
+    // a separate file with its own writer in src-tauri/. v0.2.17 keeps it
+    // simple: only Agent storage is supported; users without an upgraded
+    // Agent for the workspace need to upgrade first or use per-Tab override.
+    return cfg;
+  });
+  return { scope, ids: dedup };
+}
+
 export async function togglePlugin(
   pluginId: string,
   enabled: boolean,
@@ -401,7 +446,10 @@ export async function togglePlugin(
 // List / read
 // -----------------------------------------------------------------------------
 
-/** Quick read — no disk scans beyond `existsSync` on each install path. */
+/** Quick read — no deep disk scans. Includes a lightweight `mcpServerNames`
+ *  field per entry so the chat-input plugin submenu can show "包含 N 个 MCP
+ *  server" without a second round-trip. The scan is bounded by
+ *  scanPluginComponents and only touches a handful of files per plugin. */
 export function listInstalledPlugins(): PluginListItem[] {
   const cfg = loadConfig();
   const entries = (cfg.plugins as PluginEntry[] | undefined) ?? [];
@@ -409,18 +457,28 @@ export function listInstalledPlugins(): PluginListItem[] {
   return entries.map(entry => {
     let status: 'ok' | 'missing' | 'invalid' = 'ok';
     let warning: string | undefined;
+    let mcpServerNames: string[] | undefined;
     if (!existsSync(entry.installPath)) {
       status = 'missing';
       warning = '安装目录已被外部删除';
     } else if (!isPluginRootDir(entry.installPath)) {
       status = 'invalid';
       warning = '安装目录缺少 .claude-plugin/plugin.json';
+    } else {
+      // Cheap: just scan .mcp.json (avoids the full component walk).
+      try {
+        const comp = scanPluginComponents(entry.installPath);
+        if (comp.mcpServers.length > 0) mcpServerNames = comp.mcpServers;
+      } catch {
+        /* non-fatal — leave mcpServerNames undefined */
+      }
     }
     return {
       ...entry,
       enabled: enabledMap[entry.id] === true,
       status,
       warning,
+      mcpServerNames,
     };
   });
 }
@@ -453,20 +511,34 @@ export function getPluginDetail(pluginId: string): PluginListItem | null {
 
 /**
  * Compute the list of SDK plugin paths to inject as `Options.plugins`.
- * Filters down to entries that are (a) enabled, (b) actually exist on disk
- * as a valid plugin root, and (c) have NOT been symlink-swapped post-install
- * (defends against post-install symlink-swap → SDK loads attacker payload).
- * Returns absolute paths only.
+ * Two-layer filter (mirrors MCP):
  *
- * Called from agent-session.ts during commonQueryOptions construction.
+ *   1. Layer 1 — global visibility gate (AppConfig.enabledPlugins[id] === true)
+ *   2. Layer 2 — per-context enable list (caller passes the IDs)
+ *      - For builtin Sidecar: pass the current session's enabled plugin IDs
+ *        (initially derived from Agent.enabledPluginIds; per-Tab UI can
+ *        override transiently)
+ *      - Pass `null` / undefined to skip Layer 2 (all globally visible plugins
+ *        load) — only used in unit tests and the `/api/cc-plugin/list` debug
+ *        path.
+ *
+ * Path safety: skips entries that (a) don't exist on disk, (b) lack
+ * .claude-plugin/plugin.json, or (c) are symlinks (defends against
+ * post-install symlink-swap attack).
  */
-export function getEnabledPluginSdkConfigs(): { type: 'local'; path: string }[] {
+export function getEnabledPluginSdkConfigs(
+  contextEnabledIds?: readonly string[] | null,
+): { type: 'local'; path: string }[] {
   const cfg = loadConfig();
   const entries = (cfg.plugins as PluginEntry[] | undefined) ?? [];
-  const enabledMap = (cfg.enabledPlugins as Record<string, boolean> | undefined) ?? {};
+  const visibilityMap = (cfg.enabledPlugins as Record<string, boolean> | undefined) ?? {};
+  const contextSet = contextEnabledIds == null ? null : new Set(contextEnabledIds);
   const out: { type: 'local'; path: string }[] = [];
   for (const p of entries) {
-    if (enabledMap[p.id] !== true) continue;
+    // Layer 1: visibility gate
+    if (visibilityMap[p.id] !== true) continue;
+    // Layer 2: per-context enable
+    if (contextSet !== null && !contextSet.has(p.id)) continue;
     if (!existsSync(p.installPath)) continue;
     if (!isPluginRootDir(p.installPath)) continue;
     // Post-install symlink-swap defense: lstat (not stat) rejects a path
@@ -490,5 +562,36 @@ export function getEnabledPluginSdkConfigs(): { type: 'local'; path: string }[] 
     out.push({ type: 'local' as const, path: p.installPath });
   }
   return out;
+}
+
+/**
+ * Resolve the default enabled-plugin IDs for a workspace path by looking up
+ * the matching Agent (preferred) or Project (fallback). Returns an empty
+ * array when neither has the field set — UI is the source of truth for
+ * per-workspace selection. Layer 1 visibility gate is NOT applied here
+ * (caller decides when to gate).
+ */
+export function getDefaultEnabledPluginIdsForWorkspace(workspacePath: string): string[] {
+  if (!workspacePath) return [];
+  try {
+    const cfg = loadConfig();
+    const agents = (cfg.agents as Array<{ workspacePath?: string; enabledPluginIds?: string[] }> | undefined) ?? [];
+    const agent = agents.find(a => a.workspacePath === workspacePath);
+    if (agent?.enabledPluginIds) return [...agent.enabledPluginIds];
+    // Fall back to Project entry (legacy workspaces that haven't been
+    // upgraded to Agents still get plugin support via the workspace path).
+    const home = getHomeDirOrNull();
+    if (!home) return [];
+    const projectsPath = resolve(home, '.myagents', 'projects.json');
+    if (!existsSync(projectsPath)) return [];
+    const projects = JSON.parse(stripBom(readFileSync(projectsPath, 'utf-8'))) as Array<{
+      path?: string;
+      enabledPluginIds?: string[];
+    }>;
+    const project = Array.isArray(projects) ? projects.find(p => p.path === workspacePath) : null;
+    return project?.enabledPluginIds ? [...project.enabledPluginIds] : [];
+  } catch {
+    return [];
+  }
 }
 

@@ -94,6 +94,10 @@ export interface PluginListItem extends PluginEntry {
   status: 'ok' | 'missing' | 'invalid';
   warning?: string;
   components?: PluginComponentInventory;
+  /** PRD 0.2.17 — lightweight per-entry MCP server name list (cheaper than
+   *  full `components`). Surfaced in the chat-input plugin submenu so users
+   *  see "plugin X 包含 N 个 MCP server" without a deep scan. */
+  mcpServerNames?: string[];
 }
 
 /**
