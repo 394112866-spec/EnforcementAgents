@@ -228,23 +228,25 @@ export default function GlobalPluginsPanel({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1 space-y-2.5">
           <h2 className="text-xl font-semibold text-[var(--ink)]">插件 Plugins</h2>
-          <p className="mt-1 text-sm text-[var(--ink-muted)]">
-            Claude 插件 (skills + agents + hooks + MCP) — 来自 GitHub 或本地目录
+          <p className="text-[14px] leading-relaxed text-[var(--ink-muted)]">
+            Claude 插件（skills + agents + hooks + MCP）— 来自 GitHub 或本地目录
           </p>
-          <p className="mt-1 text-xs text-[var(--ink-muted)]">
-            ⓘ 这里的开关只决定插件「<b>是否在各工作区里出现</b>」。要实际在某个 Agent / 工作区里启用，请去 Agent 设置面板的「插件」一项，或在 Chat 输入框 ➜ 工具菜单 ➜ 插件子菜单里勾选。
+          <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+            <span className="mr-1">ⓘ</span>
+            这里的开关决定插件「<b className="text-[var(--ink)]">在各工作区是否可见</b>」。要实际启用，请去 Agent 设置或 Chat 输入框 ➜ 工具 ➜ 插件子菜单里勾选。
           </p>
-          <p className="mt-1 text-xs text-[var(--ink-muted)]">
-            ⓘ 仅作用于 MyAgents 自带 Runtime。外部 Runtime (Claude Code / Codex / Gemini) 请在该 CLI 内用 <code className="font-mono text-[11px]">/plugin</code> 管理。
+          <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+            <span className="mr-1">ⓘ</span>
+            仅作用于 MyAgents 自带 Runtime；外部 Runtime 请在该 CLI 内用 <code className="font-mono text-[12px]">/plugin</code> 管理。
           </p>
         </div>
         <button
           type="button"
           onClick={() => setShowInstall(true)}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white hover:opacity-90"
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[var(--accent)] px-3.5 py-2 text-[14px] font-medium text-white hover:opacity-90"
         >
           <Plus className="h-4 w-4" />
           安装插件
@@ -257,8 +259,9 @@ export default function GlobalPluginsPanel({
           <span className="ml-2 text-sm">加载中…</span>
         </div>
       ) : plugins.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-[var(--border)] py-16 text-center text-sm text-[var(--ink-muted)]">
-          尚未安装任何插件。点右上角「安装插件」从 GitHub 或本地路径添加。
+        <div className="rounded-lg border border-dashed border-[var(--border)] py-16 text-center text-[14px] leading-relaxed text-[var(--ink-muted)]">
+          尚未安装任何插件。<br />
+          点右上角「安装插件」从 GitHub 或本地路径添加。
         </div>
       ) : (
         <ul className="space-y-2">
@@ -324,22 +327,22 @@ function PluginCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             {isBad && <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" />}
-            <h3 className="truncate text-base font-medium text-[var(--ink)]">
+            <h3 className="truncate text-[15px] font-medium text-[var(--ink)]">
               {item.name}
             </h3>
             {item.version && (
-              <span className="shrink-0 text-xs text-[var(--ink-muted)]">
+              <span className="shrink-0 text-[13px] text-[var(--ink-muted)]">
                 v{item.version}
               </span>
             )}
           </div>
           {item.description && (
-            <p className="mt-0.5 line-clamp-1 text-sm text-[var(--ink-muted)]">
+            <p className="mt-1 line-clamp-1 text-[13px] text-[var(--ink-muted)]">
               {item.description}
             </p>
           )}
           {item.warning && (
-            <p className="mt-1 text-xs text-amber-600 dark:text-amber-500">
+            <p className="mt-1 text-[12px] text-amber-600 dark:text-amber-500">
               ⚠ {item.warning}
             </p>
           )}
