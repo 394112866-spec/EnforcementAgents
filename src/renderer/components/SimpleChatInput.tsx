@@ -2126,7 +2126,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 onClose={() => setShowToolMenu(false)}
                 anchorRef={toolBtnRef}
                 placement="top-start"
-                className="w-64 py-1"
+                // max-h + overflow-y-auto so a workspace with 13+ enabled
+                // plugins (anthropics/claude-for-legal etc.) doesn't blow
+                // past the viewport top. 60vh keeps it readable on small
+                // screens while still showing ~8 rows on a 13" laptop.
+                className="w-64 max-h-[60vh] overflow-y-auto py-1"
               >
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
                       工具 (在此对话中启用)

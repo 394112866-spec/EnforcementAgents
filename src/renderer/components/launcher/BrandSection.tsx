@@ -63,6 +63,10 @@ interface BrandSectionProps {
     globalMcpEnabled?: string[];
     mcpServers?: Array<{ id: string; name: string; description?: string }>;
     onWorkspaceMcpToggle?: (serverId: string, enabled: boolean) => void;
+    // PRD 0.2.17 — Claude Plugins (passthrough to SimpleChatInput).
+    globallyVisiblePlugins?: Array<{ id: string; name: string; description?: string }>;
+    workspaceEnabledPlugins?: string[];
+    onWorkspacePluginToggle?: (pluginId: string, enabled: boolean) => void;
     onRefreshProviders?: () => void;
     // Navigation
     onGoToSettings?: () => void;
@@ -103,6 +107,9 @@ export default memo(function BrandSection({
     globalMcpEnabled,
     mcpServers,
     onWorkspaceMcpToggle,
+    globallyVisiblePlugins,
+    workspaceEnabledPlugins,
+    onWorkspacePluginToggle,
     onRefreshProviders,
     onGoToSettings,
     runtime,
@@ -485,6 +492,9 @@ export default memo(function BrandSection({
                                 globalMcpEnabled={globalMcpEnabled}
                                 mcpServers={mcpServers}
                                 onWorkspaceMcpToggle={onWorkspaceMcpToggle}
+                                globallyVisiblePlugins={globallyVisiblePlugins}
+                                workspaceEnabledPlugins={workspaceEnabledPlugins}
+                                onWorkspacePluginToggle={onWorkspacePluginToggle}
                                 onRefreshProviders={onRefreshProviders}
                                 runtime={runtime}
                                 runtimeModels={runtimeModels}

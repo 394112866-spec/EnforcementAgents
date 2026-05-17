@@ -469,13 +469,15 @@ function PluginDetailView({
         </button>
       </div>
 
-      {/* Metadata card — paper-elevated with no border, mirroring the
-       *  紧凑卡片 (compact card) spec from DESIGN.md §6.2. */}
+      {/* Metadata card — bordered "主卡片" (DESIGN.md §6.2): paper-elevated
+       *  + 1px line border + p-5. Compact (no-border) cards are reserved
+       *  for clickable list items; static content blocks like these need
+       *  the border to visually contain themselves. */}
       <section>
         <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
           元数据
         </h3>
-        <div className="rounded-xl bg-[var(--paper-elevated)] px-5 py-4">
+        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-5 py-4">
           <dl className="grid grid-cols-[max-content_1fr] gap-x-5 gap-y-2 text-[13px]">
             <MetaRow label="作者" value={plugin.author} />
             <MetaRow label="License" value={plugin.license} />
@@ -561,13 +563,13 @@ function ComponentInventoryGrid({ inv }: { inv: PluginComponentInventory }) {
       {blocks.map(([label, value]) => (
         <ComponentBlock key={label} label={label} value={value} />
       ))}
-      <div className="rounded-xl bg-[var(--paper-elevated)] px-4 py-3 transition-shadow hover:shadow-sm">
+      <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3">
         <div className="text-[11px] font-medium uppercase tracking-[0.04em] text-[var(--ink-muted)]">Hooks</div>
         <div className="mt-1.5 text-[14px] text-[var(--ink)]">
           {inv.hooks > 0 ? `${inv.hooks} 个事件处理器` : <span className="text-[var(--ink-muted)]">— 无</span>}
         </div>
       </div>
-      <div className="rounded-xl bg-[var(--paper-elevated)] px-4 py-3 transition-shadow hover:shadow-sm">
+      <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3">
         <div className="text-[11px] font-medium uppercase tracking-[0.04em] text-[var(--ink-muted)]">Bin</div>
         <div className="mt-1.5 text-[14px] text-[var(--ink)]">
           {inv.hasBin ? '✓ 有可执行文件' : <span className="text-[var(--ink-muted)]">— 无</span>}
@@ -587,7 +589,7 @@ function ComponentBlock({
   const items = Array.isArray(value) ? value : [];
   const count = items.length;
   return (
-    <div className="rounded-xl bg-[var(--paper-elevated)] px-4 py-3 transition-shadow hover:shadow-sm">
+    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3">
       <div className="text-[11px] font-medium uppercase tracking-[0.04em] text-[var(--ink-muted)]">{label}</div>
       <div className="mt-1.5 text-[14px] text-[var(--ink)]">
         {count === 0 ? <span className="text-[var(--ink-muted)]">— 无</span> : `${count} 个`}

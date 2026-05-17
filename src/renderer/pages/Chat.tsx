@@ -958,6 +958,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           await apiPost('/api/mcp/set', { servers: effective });
         }
 
+        // 1b. PRD 0.2.17 — Sync plugin selection (Launcher → new Tab handoff).
+        // Both `setWorkspaceEnabledPlugins` local state AND a session-enable
+        // push so the sidecar's commonQueryOptions picks up the choice on
+        // first pre-warm. Symmetric with MCP above.
+        if (initialMessage.enabledPluginIds) {
+          setWorkspaceEnabledPlugins(initialMessage.enabledPluginIds);
+          await apiPost('/api/cc-plugin/session-enable', {
+            enabledIds: initialMessage.enabledPluginIds,
+          });
+        }
+
         // 3. Update local UI state to reflect Launcher choices
         if (initialMessage.permissionMode) {
           // External runtime has its own permission mode state (runtimePermissionMode),
