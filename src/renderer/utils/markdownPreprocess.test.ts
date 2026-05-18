@@ -19,6 +19,19 @@ describe('preprocessMarkdownContent', () => {
     expect(preprocessMarkdownContent('结果：# 标题')).toBe('结果：\n\n# 标题');
   });
 
+  // GitHub-style issue / PR references at line start MUST NOT be rewritten into
+  // ATX headings. Without the digit exclusion in 2c, `#210` becomes `# 210`
+  // which CommonMark parses as `<h1>210</h1>`, infecting the rest of the line.
+  test('leaves issue / PR references at line start as plain text', () => {
+    expect(preprocessMarkdownContent('#210 现在去 issue 里问。')).toBe('#210 现在去 issue 里问。');
+    expect(preprocessMarkdownContent('#212：没修改')).toBe('#212：没修改');
+  });
+
+  test('still adds space after # for non-digit text at line start', () => {
+    expect(preprocessMarkdownContent('#标题')).toBe('# 标题');
+    expect(preprocessMarkdownContent('##Title')).toBe('## Title');
+  });
+
   // Issue #167 — Chinese-tuned models (DeepSeek, MiniMax, …) emit full-width
   // punctuation U+FF0A `＊` in place of ASCII `*`, so bold rendered as literal
   // ＊＊P1＊＊ instead of <strong>P1</strong>. Normalize paired patterns only.

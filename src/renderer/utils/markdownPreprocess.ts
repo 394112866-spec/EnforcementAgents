@@ -67,8 +67,10 @@ export function preprocessMarkdownContent(content: string): string {
   processed = processed.replace(/([^\n#\p{L}\p{N}])(#{1,6}\s+)(?=\S)/gu, '$1\n\n$2');
 
   // 2c. Ensure headers at the start of lines have a space after # (if missing)
-  // "##Title" -> "## Title" (only at line start)
-  processed = processed.replace(/^(#{1,6})([^\s#\n])/gm, '$1 $2');
+  // "##Title" -> "## Title" (only at line start). Exclude `#<digit>` so that
+  // issue / PR references like `#210` at line start aren't rewritten into a
+  // heading (CommonMark `# 210` is an H1).
+  processed = processed.replace(/^(#{1,6})([^\s#\n\d])/gm, '$1 $2');
 
   // 2d. Fix unordered list items at LINE START ONLY
   // "-item" -> "- item"
