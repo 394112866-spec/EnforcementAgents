@@ -42,3 +42,50 @@ export function sanitizeInboxLabel(raw: string | undefined | null): string {
   if (!truncated) return FALLBACK_LABEL;
   return truncated.replace(/[<>&"']/g, (c) => HTML_ESCAPE_MAP[c]!) || FALLBACK_LABEL;
 }
+
+/**
+ * Neutralize structural inbox tags in a message body so the wrapping envelope
+ * (`<inbox-message>...</inbox-message>` / `<inbox-reply>...</inbox-reply>`)
+ * can't be prematurely closed or a fake sibling envelope injected by the
+ * attacker-controlled body. Defense-in-depth — natural-language injection
+ * inside the body is still possible (see sanitizeInboxLabel module comment).
+ *
+ * **Single source of truth.** Both `drain-handler.ts` (inbox path) and
+ * `index.ts::buildCronEventPrompt` (cron→IM envelope) MUST import this
+ * helper. Inline copies drift on the next defense extension (cross-review CC
+ * HIGH #5 + Architecture M1).
+ *
+ * We don't full HTML-escape the body because that breaks legitimate markdown
+ * (`<` `>` in code blocks). Only the structural tags this pipeline introduces
+ * get rewritten. A defender can still see literal `&lt;/inbox-message&gt;` in
+ * the body if the user really wrote it — that's transparency, not a bug.
+ *
+ * Defense covers (cross-review Codex Critical #2):
+ *   - ASCII `<` / `>` (U+003C / U+003E)
+ *   - Fullwidth `＜` / `＞` (U+FF1C / U+FF1E) — some tokenizers normalize
+ *     these to ASCII, so the wrapper can be smuggled past a naive regex
+ *   - Whitespace before the closing `>` (e.g. `</inbox-message  >`) — the
+ *     XML spec tolerates trailing whitespace; a strict-`>` regex doesn't
+ */
+const TAG_BRACKET_OPEN = '[<\\uFF1C]';
+const TAG_BRACKET_CLOSE = '[>\\uFF1E]';
+
+export function neutralizeInboxStructuralTags(body: string): string {
+  return body
+    .replace(
+      new RegExp(`${TAG_BRACKET_OPEN}/inbox-message\\s*${TAG_BRACKET_CLOSE}`, 'gi'),
+      '&lt;/inbox-message&gt;',
+    )
+    .replace(
+      new RegExp(`${TAG_BRACKET_OPEN}/inbox-reply\\s*${TAG_BRACKET_CLOSE}`, 'gi'),
+      '&lt;/inbox-reply&gt;',
+    )
+    .replace(
+      new RegExp(`${TAG_BRACKET_OPEN}inbox-message\\b`, 'gi'),
+      '&lt;inbox-message',
+    )
+    .replace(
+      new RegExp(`${TAG_BRACKET_OPEN}inbox-reply\\b`, 'gi'),
+      '&lt;inbox-reply',
+    );
+}

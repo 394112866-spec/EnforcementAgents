@@ -5413,6 +5413,15 @@ function clearMessageState(): void {
   // Defensive: in practice, resetSession / switchToSession drain earlier (before
   // awaitSessionTermination); initializeAgent is typically called on an empty queue.
   drainQueueWithCancellation();
+  // PRD 0.2.18 — same treatment as drainQueueWithCancellation: if any
+  // pendingMidTurnQueue items carry inboxMeta.replyBack=true, push a reply
+  // before drop. In normal flow rescuePendingToQueue (called by
+  // abortPersistentSession) has already moved these into messageQueue and
+  // drainQueueWithCancellation handled them — so this is a defensive cleanup
+  // for paths that hit clearMessageState without going through abort first.
+  for (const pending of pendingMidTurnQueue) {
+    pushInboxAbortReplyForQueuedItem(pending.sourceItem, 'message_dropped_on_clear');
+  }
   pendingMidTurnQueue.length = 0;
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
@@ -5463,11 +5472,42 @@ function clearMessageState(): void {
 function drainQueueWithCancellation(): void {
   if (messageQueue.length === 0) return;
   console.log(`[agent] Draining ${messageQueue.length} queued messages (explicit cancel)`);
+  // PRD 0.2.18 — items carrying inboxMeta.replyBack=true are inbox messages
+  // queued but never yielded. Drop them without telling the caller and they
+  // hang forever (cross-review CC HIGH #3). Push a session_aborted reply
+  // before resolving (fire-and-forget; we don't block teardown).
   for (const item of messageQueue) {
+    pushInboxAbortReplyForQueuedItem(item, 'message_dropped_on_reset');
     item.resolve();
     broadcast('queue:cancelled', { queueId: item.id });
   }
   messageQueue.length = 0;
+}
+
+/** Push a session_aborted-style inbox reply for a queued item that will be
+ *  dropped without ever running. Safe no-op when the item carries no inboxMeta
+ *  or replyBack=false. */
+function pushInboxAbortReplyForQueuedItem(
+  item: { inboxMeta?: import('./inbox/types').InboxTurnMeta },
+  code: 'message_dropped_on_reset' | 'message_dropped_on_clear',
+): void {
+  const meta = item.inboxMeta;
+  if (!meta || !meta.replyBack) return;
+  const sid = sessionId;
+  void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
+    deliverInboxReply(sid, meta, {
+      text: '',
+      error: {
+        code,
+        message:
+          code === 'message_dropped_on_reset'
+            ? 'target session was reset before the message ran'
+            : 'target session state was cleared before the message ran',
+      },
+    }),
+  ).catch((err) =>
+    console.error('[inbox] queued-drop reply pushback failed:', err),
+  );
 }
 
 /**

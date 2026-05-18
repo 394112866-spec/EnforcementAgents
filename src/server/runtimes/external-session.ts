@@ -1784,6 +1784,19 @@ async function persistTurnResult(): Promise<void> {
   // Caller still gets the error via the fire-and-forget `.catch` for logging.
   // v0.2.14 cross-bugfix follow-up.
 
+  // PRD 0.2.18 Session Inbox — snapshot meta + hints SYNCHRONOUSLY at entry
+  // and immediately clear the module slots, so a concurrent sendExternalMessage
+  // arriving during the await chain below cannot overwrite them. Without this,
+  // turn_complete sets turnCompleted=true and fires persistTurnResult
+  // fire-and-forget; the busy gate at L1249 stops blocking; the next
+  // sendExternalMessage runs L1265 (`currentTurnInboxMeta = next ?? null`)
+  // before this turn's finally reads the meta — replying to the wrong caller
+  // or losing the reply entirely (cross-review CC BLOCKER #1 + Codex Critical
+  // #1 / Scenario 1+11).
+  const turnInboxMeta = currentTurnInboxMeta;
+  currentTurnInboxMeta = null;
+  const turnAttachmentHints = currentTurnAttachmentHints.splice(0);
+
   // PRD 0.2.18 Session Inbox — capture turn text BEFORE resetTurnAccumulators()
   // wipes it (cross-review CC + Architecture: the original impl read
   // `currentAssistantText` in the finally block AFTER reset → always empty for
@@ -1808,7 +1821,7 @@ async function persistTurnResult(): Promise<void> {
 
     // PRD 0.2.18 — capture reply text into local var BEFORE resetTurnAccumulators
     // clears the source. The finally block reads this for inbox reply pushback.
-    if (currentTurnInboxMeta) {
+    if (turnInboxMeta) {
       if (currentContentBlocks.length > 0) {
         capturedReplyText = currentContentBlocks
           .filter((b) => b.type === 'text' && typeof b.text === 'string')
@@ -1884,15 +1897,10 @@ async function persistTurnResult(): Promise<void> {
     });
   } finally {
     // PRD 0.2.18 Session Inbox — reply pushback for external runtime.
-    // Hook here (after persistTurnResult body finishes, INSIDE finally) to
-    // ensure idle race (#198) is avoided: we wait for body completion before
-    // checking lastTurnSucceeded + pushing reply. fire-and-forget so it
-    // doesn't block the idle transition that follows.
-    if (currentTurnInboxMeta) {
-      const replyMeta = currentTurnInboxMeta;
-      currentTurnInboxMeta = null;
-      const attachmentHints = [...currentTurnAttachmentHints];
-      currentTurnAttachmentHints.length = 0;
+    // Use the meta/hints snapshotted at entry (NOT module-level slots, which
+    // may have been overwritten by a concurrent sendExternalMessage during
+    // the await chain above).
+    if (turnInboxMeta) {
       // Use captured-before-reset text (PRD 0.2.18 cross-review fix). If reset
       // didn't actually fire (early throw path), fall back to currentAssistantText.
       const replyText = capturedReplyText || currentAssistantText.trim();
@@ -1902,12 +1910,12 @@ async function persistTurnResult(): Promise<void> {
             code: 'turn_failed',
             message: 'external runtime turn did not complete successfully',
           };
-      const sid = lastSessionId ?? '';
+      const sid = lastSessionId;
       void import('../inbox/reply-deliver').then(({ deliverInboxReply }) =>
-        deliverInboxReply(sid, replyMeta, {
+        deliverInboxReply(sid, turnInboxMeta, {
           text: replyText,
           error: replyError,
-          attachmentHints: attachmentHints.length > 0 ? attachmentHints : undefined,
+          attachmentHints: turnAttachmentHints.length > 0 ? turnAttachmentHints : undefined,
         }),
       ).catch((err) =>
         console.error('[inbox] external turn-end reply pushback failed:', err),

@@ -13,29 +13,9 @@
 //   - 注入时 sanitize fromLabel(集中点),避免 prompt injection
 //     (`</inbox-message>` 闭合标签注入等)。
 
-import { sanitizeInboxLabel } from './sanitize-label';
+import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './sanitize-label';
 import { buildInReplyToSnippet } from './types';
 import type { PendingInboxMessage, DrainResponse, InboxTurnMeta } from './types';
-
-/**
- * Neutralize closing tags inside the body so a hostile caller can't forge
- * envelope structure (PRD 0.2.18 cross-review Codex critical: `</inbox-message>`
- * embedded in user prompt would let attacker close our wrapper + inject fake
- * `<inbox-reply>` or arbitrary structure seen by target AI).
- *
- * We don't full HTML-escape the body because that breaks legitimate markdown
- * (`<` `>` in code blocks). Instead, target only the structural tags this
- * pipeline introduces. A defender can still see literal `&lt;/inbox-message&gt;`
- * in the body if the user really wrote it — that's a feature (transparency)
- * not a bug.
- */
-function neutralizeInboxStructuralTags(body: string): string {
-  return body
-    .replace(/<\/inbox-message>/gi, '&lt;/inbox-message&gt;')
-    .replace(/<\/inbox-reply>/gi, '&lt;/inbox-reply&gt;')
-    .replace(/<inbox-message\b/gi, '&lt;inbox-message')
-    .replace(/<inbox-reply\b/gi, '&lt;inbox-reply');
-}
 
 /// 构造 <inbox-message> 包裹 (Request 模式)
 function buildInboxMessagePrompt(msg: PendingInboxMessage): string {

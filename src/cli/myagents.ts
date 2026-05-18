@@ -57,8 +57,22 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
       const eq = raw.indexOf('=');
       const key = eq >= 0 ? raw.slice(0, eq) : raw;
       const inlineValue = eq >= 0 ? raw.slice(eq + 1) : undefined;
-      // Boolean flags (no value follows)
-      if (key === 'help' || key === 'json' || key === 'dry-run' || key === 'disable-nonessential' || key === 'full') {
+      // Boolean flags (no value follows). Missing entries trigger the
+      // generic key-value branch below — which consumes the NEXT token as
+      // value when it doesn't start with `--`. That silently eats short
+      // flags like `-p` (cross-review CC BLOCKER #2: `session send <sid>
+      // --no-reply -p "..."` parsed `noReply='-p'` and dropped the prompt).
+      // Add any new presence-only flag here.
+      if (
+        key === 'help' ||
+        key === 'json' ||
+        key === 'dry-run' ||
+        key === 'disable-nonessential' ||
+        key === 'full' ||
+        key === 'no-reply' ||
+        key === 'clear-provider-override' ||
+        key === 'clear-runtime-override'
+      ) {
         flags[camelCase(key)] = true;
         i++;
         continue;

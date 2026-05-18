@@ -224,7 +224,15 @@ pub async fn deliver_with_resume(
             };
         }
         Err(e) => {
+            // Cross-review Codex Warning #2 — the spawn_blocking JoinError arm
+            // (fires when the resume thread panics, e.g. if the inner
+            // `cleanup_stale_sidecars` panics during ensure_session_sidecar)
+            // previously returned without releasing the transient owner. If
+            // the panic happened AFTER the owner was inserted but BEFORE
+            // delivery, the resumed sidecar would carry our transient owner
+            // forever (idempotent release is safe — no-op if owner is absent).
             ulog_error!("[inbox] spawn_blocking for resume failed: {}", e);
+            release_transient_owner(manager, &to_sid, &transient_owner);
             return DeliverOutcome::DeliveryFailed {
                 reason: format!("spawn_blocking failed: {}", e),
             };
@@ -256,12 +264,17 @@ fn release_transient_owner(
         let was_last = sidecar.remove_owner(owner);
         if was_last {
             // No real owners attached during our window — the sidecar is now
-            // unowned. Don't kill it here (let the standard idle collector
-            // handle it via the normal lifecycle path; killing inline would
-            // race with any operations the sidecar is doing for our just-sent
-            // turn). The next idle sweep / explicit stop will collect it.
+            // unowned. Cross-review Codex Warning #3 — earlier comment
+            // referenced an "idle collector" that does not exist; we only
+            // reap on app shutdown / explicit stop / process-health failure.
+            // Killing inline would race with any in-flight work for our
+            // just-sent turn, so the resumed sidecar stays alive until the
+            // next process-level lifecycle event. This is the intended
+            // trade-off — small RSS overhead for safety. If unowned-idle
+            // reaping becomes desirable, wire it into the sidecar lifecycle
+            // (cleanup_stale_sidecars currently only runs at startup).
             ulog_info!(
-                "[inbox] released transient owner for {}; sidecar now has no owners (idle collector will reap)",
+                "[inbox] released transient owner for {}; sidecar now has no owners (stays alive until process exit / explicit stop)",
                 session_id
             );
         } else {

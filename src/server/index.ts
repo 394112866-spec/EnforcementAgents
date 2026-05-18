@@ -612,7 +612,7 @@ import type { ImagePayload } from './runtimes/types';
 import { VALID_RUNTIMES, resolveCronPermissionMode } from '../shared/types/runtime';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
 // PRD 0.2.18 Session Inbox — sanitize helper for cron envelope wrapping
-import { sanitizeInboxLabel } from './inbox/sanitize-label';
+import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './inbox/sanitize-label';
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
 
@@ -1359,9 +1359,21 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
       replyBack: payload.replyBack !== false,
     };
     const result = await handleAdminInbox(getSessionId(), sessionRequest);
+    // PRD 0.2.18 cross-review CC HIGH #4 — the previous shape spread
+    // `result.response` AFTER `error: string`, so the nested `error: { code,
+    // message }` object overwrote the string. CLI printResult then rendered
+    // `Error: [object Object]`. Put the spread first and let explicit fields
+    // win; also surface `code` at top level so the granular exit-code branch
+    // in cli/myagents.ts:1627-1633 can read it without destructuring the
+    // nested error object.
     return result.status >= 200 && result.status < 300
       ? { success: true, ...(result.response as unknown as Record<string, unknown>) }
-      : { success: false, error: result.response.error?.message ?? 'delivery failed', ...result.response };
+      : {
+          ...(result.response as unknown as Record<string, unknown>),
+          success: false,
+          error: result.response.error?.message ?? 'delivery failed',
+          code: result.response.error?.code,
+        };
   }
 
   // System commands
@@ -1520,13 +1532,11 @@ function buildCronEventPrompt(
   ): string => {
     if (!e.fromSessionId || !e.fromLabel) return e.content;
     const label = sanitizeInboxLabel(e.fromLabel);
-    // Neutralize closing tags in cron content (same defense as drain-handler;
-    // PRD 0.2.18 cross-review Codex critical).
-    const safeBody = e.content
-      .replace(/<\/inbox-message>/gi, '&lt;/inbox-message&gt;')
-      .replace(/<\/inbox-reply>/gi, '&lt;/inbox-reply&gt;')
-      .replace(/<inbox-message\b/gi, '&lt;inbox-message')
-      .replace(/<inbox-reply\b/gi, '&lt;inbox-reply');
+    // Cross-review CC HIGH #5 + Architecture M1: use the single-source-of-truth
+    // helper instead of an inline copy. Inline regex was missing whitespace-
+    // tolerant close tags and fullwidth-bracket smuggling (cross-review Codex
+    // Critical #2) — defense in the shared helper covers both.
+    const safeBody = neutralizeInboxStructuralTags(e.content);
     return `<inbox-message from="${label}" reply_back="false">\n${safeBody}\n</inbox-message>`;
   };
 
