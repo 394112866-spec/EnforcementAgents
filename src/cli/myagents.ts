@@ -35,6 +35,16 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
   const flags: Record<string, unknown> = {};
   const repeatable = new Set(['args', 'env', 'headers', 'models', 'model-names']);
 
+  // PRD 0.2.18 cross-review fix (Codex): added short-flag → long-flag mapping
+  // so `myagents session send <sid> -p "..."` works as documented in PRD §3.1
+  // and SKILL.md. Only specific aliases are mapped; bare `-` prefixed positional
+  // args remain valid (none of the current commands actually use bare-`-`
+  // positional, but the explicit allow-list keeps the door open if needed).
+  const shortFlagAliases: Record<string, string> = {
+    'p': 'prompt',
+    // Add more here if PRD documents additional short flags.
+  };
+
   let i = 0;
   while (i < args.length) {
     const arg = args[i];
@@ -92,6 +102,18 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
       }
       flags[camelCase(key)] = value;
       i += 2;
+    } else if (arg.length === 2 && arg.startsWith('-') && shortFlagAliases[arg.slice(1)]) {
+      // Short flag (e.g. -p) maps to long flag (--prompt). Always consumes the
+      // next token as value (or treats as boolean if next is missing/another flag).
+      const longKey = shortFlagAliases[arg.slice(1)]!;
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith('-')) {
+        flags[camelCase(longKey)] = true;
+        i++;
+      } else {
+        flags[camelCase(longKey)] = value;
+        i += 2;
+      }
     } else {
       positional.push(arg);
       i++;
@@ -164,6 +186,7 @@ Commands:
   task      Manage Task Center tasks (list/get/update-status/run/rerun ...)
   thought   Manage Task Center thoughts (list/create)
   im        IM runtime actions for current chat (send-media)
+  session   Session-to-session messaging (send a prompt to another session, reply auto-pushed back)
   widget    Generative UI widget design guidelines (readme)
   plugin    Manage OpenClaw channel plugins (IM npm-packaged adapters)
   cc-plugin Manage Claude plugins (PRD 0.2.17 — Anthropic plugin protocol)
@@ -1531,6 +1554,20 @@ async function main(): Promise<void> {
     printResult(group, action, result, jsonMode, flags);
   }
 
+  // PRD 0.2.18 session send — granular exit codes per --help contract:
+  //   0 = delivered, 1 = sessionId not found, 2 = delivery failed/rejected,
+  //   3 = arg error (already handled in buildRequestBody).
+  // Cross-review CC flagged the generic exit(1) override loses CLI exit contract.
+  if (result && !result.success && group === 'session' && action === 'send') {
+    const errorBody = result.error ?? result;
+    const code = typeof errorBody === 'object' && errorBody && 'code' in errorBody
+      ? (errorBody as { code?: string }).code
+      : (result as { code?: string }).code;
+    if (code === 'session_not_found') process.exit(1);
+    if (code === 'rejected' || code === 'delivery_failed') process.exit(2);
+    process.exit(1); // fallback
+  }
+
   // Exit with proper code: 0 = success, 1 = business error
   if (result && !result.success) process.exit(1);
 }
@@ -2031,6 +2068,81 @@ function buildRequestBody(
       return { content: trimmed };
     }
     if (action === 'readme') return {}; // graceful no-op surfaced via admin-api
+    return {};
+  }
+
+  // ===== Session Inbox (PRD 0.2.18) — `myagents session send` =====
+  if (group === 'session') {
+    if (action === 'send') {
+      // Positional: <sessionId>
+      // Flags: -p / --prompt | --prompt-file (mutually exclusive), --no-reply
+      const toSessionId = requirePositional(
+        rest[0] ?? (flags.toSessionId as string | undefined) ?? (flags.to as string | undefined),
+        'sessionId',
+        'session send',
+        'toSessionId',
+      );
+
+      // -p (short) is now mapped to --prompt by parseArgs shortFlagAliases.
+      let promptText = flags.prompt as string | undefined;
+      const MAX_PROMPT_BYTES = 4 * 1024;
+
+      if (flags.promptFile && typeof flags.promptFile === 'string') {
+        if (promptText !== undefined) {
+          console.error('Error: --prompt-file and -p/--prompt are mutually exclusive');
+          process.exit(3);
+        }
+        try {
+          const fs = require('fs') as typeof import('fs');
+          const MAX_FILE_BYTES = 1024 * 1024; // 1 MB safety cap (mirror cron add)
+          const stat = fs.statSync(flags.promptFile);
+          if (stat.size > MAX_FILE_BYTES) {
+            console.error(`Error: --prompt-file "${flags.promptFile}" is ${stat.size} bytes, exceeds ${MAX_FILE_BYTES} (1 MB) limit`);
+            process.exit(1);
+          }
+          const raw = fs.readFileSync(flags.promptFile, 'utf-8');
+          if (raw.includes('\0')) {
+            console.error(`Error: --prompt-file "${flags.promptFile}" contains NUL bytes (is this a binary file?)`);
+            process.exit(1);
+          }
+          promptText = raw;
+        } catch (err) {
+          console.error(`Error: failed to read --prompt-file "${flags.promptFile}": ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(1);
+        }
+      }
+
+      if (!promptText || promptText.length === 0) {
+        console.error('Error: session send requires --prompt "<text>" or --prompt-file <path>');
+        console.error('  → Tip: see `myagents session send --help` for usage examples');
+        process.exit(3);
+      }
+
+      // Fail-fast guard: inline -p with newlines or >4KB will be truncated on
+      // Windows by cmd.exe (\\n treated as command boundary). Always require
+      // --prompt-file for those cases — uniform behavior across platforms,
+      // forces good habits. Exit 3 = arg validation error.
+      if (!flags.promptFile) {
+        if (promptText.includes('\n')) {
+          console.error('Error: -p / --prompt content contains newlines (\\n) — Windows cmd.exe truncates flags after \\n,');
+          console.error('       which would drop subsequent flags. Write the content to a file and use --prompt-file instead:');
+          console.error('         myagents session send <sid> --prompt-file <path>');
+          process.exit(3);
+        }
+        if (promptText.length > MAX_PROMPT_BYTES) {
+          console.error(`Error: -p / --prompt content is ${promptText.length} bytes, exceeds ${MAX_PROMPT_BYTES} (4 KB) limit.`);
+          console.error('       Write the content to a file and use --prompt-file instead:');
+          console.error('         myagents session send <sid> --prompt-file <path>');
+          process.exit(3);
+        }
+      }
+
+      return {
+        toSessionId,
+        prompt: promptText,
+        replyBack: !flags.noReply,
+      };
+    }
     return {};
   }
 

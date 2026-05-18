@@ -1547,6 +1547,76 @@ Typical flow (AI preparing a task override):
   1. myagents agent show <id>          — learn current defaults
   2. myagents runtime describe <rt>    — see valid model + permission values
   3. myagents task create-direct ... --runtime <rt> --model <m>`,
+
+  session: `myagents session send — 给另一个 session 投送一条消息 (PRD 0.2.18)
+
+USAGE
+  myagents session send <sessionId> -p "<prompt>" [OPTIONS]
+  myagents session send <sessionId> --prompt-file <path> [OPTIONS]
+
+DESCRIPTION
+  把一条消息异步投送给另一个 session。CLI 立即返回投递结果(成功/失败),
+  不等待目标处理。目标 session 当前是否活跃不影响投递——idle 的 session
+  会被自动唤起(类似用户在桌面打开历史记录),处理完成后按现有机制释放。
+
+  目标 session 处理完成后:
+    • 默认: 其回应会被自动推送回你这里。你将在新的 turn 收到一条带
+      <inbox-reply> 前缀的消息,可以继续推进对话或发起新一轮 send
+    • --no-reply: 其回应走目标 session 自己的呈现路径(IM Bot 推到 IM、
+      桌面 session 显示在桌面 Tab),不会推回给你
+
+WHEN TO USE
+  ✓ 你收到了来自其它 session 的消息(如 <inbox-message> 或 cron 推送),
+    用户希望你向那个 session 反馈、追问、澄清或下指令
+  ✓ 用户在对话里给了你一个 sessionId,让你与其交互
+  ✗ 想答复当前用户——直接回复就行,不要用这个工具
+  ✗ 想给 IM peer 发消息——用 \`myagents im send\`,不是这个
+
+OPTIONS
+  <sessionId>            目标 session 的 ID(必填)
+  -p, --prompt TEXT      消息内容(与 --prompt-file 二选一,适合单行短文本)
+  --prompt-file PATH     消息内容文件路径(与 -p 二选一,适合多行 / 长文本 /
+                         任何含换行或特殊字符的内容,跨平台稳定)
+  --no-reply             不期待回应推回(默认会推回)
+
+ABOUT IDENTITY
+  系统会自动用你所在 session 的元数据(cron task name / IM bot name /
+  session name 等)作为对方看到的 from 标识——你不需要也不应该手动
+  指定身份。
+
+PLATFORM NOTE
+  Windows 上 cmd.exe 会把 -p 文本中的换行符当成命令边界截断,导致后续
+  flag 全部丢失。本 CLI 在 -p 模式下检测到内容含 \\n 或长度 > 4KB 时
+  会立即 fail-fast(exit 3),提示你切到 --prompt-file。所有平台行为
+  一致——养成统一习惯,长 / 多行内容写到临时文件再传路径。
+
+EXIT CODES
+  0   投递成功
+  1   sessionId 不存在 / 业务错误
+  2   投递失败(目标 sidecar 不可达 / Rust 路由错误等)
+  3   参数错误(包括 -p 含 \\n 或超长时的 fail-fast)
+
+EXAMPLES
+  # 让目标 session 处理一件事并把结果推回来(最常见,短文本)
+  myagents session send sess_abc123 -p "用户希望加上 deepseek 也跑一遍"
+
+  # 仅通知,不期待回应
+  myagents session send sess_xyz789 -p "任务已完成,无需回应" --no-reply
+
+  # 多行 / 长文本(必须用 --prompt-file,跨平台稳定)
+  myagents session send sess_abc123 --prompt-file /tmp/inbox_msg.txt
+
+ASYNC NOTES
+  这是异步通道。如果默认期待 reply,reply 到达时你会在下一个 turn 收到:
+
+    <inbox-reply from="<label>" in_reply_to="<原 message 前 40 字>">
+    那个 task 我已经加上 deepseek 了,下次 03:00 跑
+    </inbox-reply>
+
+  in_reply_to 帮你在同时发出多条 send 时关联回是哪一条的回应。
+
+SEE ALSO
+  myagents im send           给 IM peer 发消息(不是给 session)`,
 };
 
 export function handleHelp(payload: { path?: string[] }): AdminResponse {

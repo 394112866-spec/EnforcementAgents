@@ -884,6 +884,10 @@ type MessageQueueItem = {
   // at the IM edge (Rust mod.rs spawn entry → /api/im/chat payload).
   // Empty string for desktop / cron / heartbeat paths (no IM identity).
   requestId?: string;
+  // PRD 0.2.18 Session Inbox — per-turn binding for reply pushback.
+  // Bound on dequeue (generator yield), read at result handler. When present
+  // and replyBack=true, turn-end pushes <inbox-reply> back to caller session.
+  inboxMeta?: import('./inbox/types').InboxTurnMeta;
 };
 const messageQueue: MessageQueueItem[] = [];
 // Pending attachments to persist with user messages
@@ -1409,6 +1413,28 @@ function abortPersistentSession(): void {
     imRequestRegistry.unregister(reqId);
   }
   clearPendingRequests();
+  // PRD 0.2.18 Session Inbox — if abort happens while an inbox-message turn is
+  // in flight, push a session_aborted reply back to the caller so it doesn't
+  // wait forever. Fire-and-forget. Read + clear immediately to avoid the
+  // recovery session inheriting this binding.
+  if (currentTurnInboxMeta) {
+    const replyMeta = currentTurnInboxMeta;
+    currentTurnInboxMeta = undefined;
+    const replyText = currentTurnTextBlocks.join('').trim();
+    currentTurnTextBlocks.length = 0;
+    const abortedSessionId = sessionId;
+    void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
+      deliverInboxReply(abortedSessionId, replyMeta, {
+        text: replyText,
+        error: {
+          code: 'session_aborted',
+          message: 'target session was aborted before the turn completed',
+        },
+      }),
+    ).catch((err) =>
+      console.error('[inbox] abort-path reply pushback failed:', err),
+    );
+  }
   // 唤醒被阻塞的 generator（waitForMessage）
   if (messageResolver) {
     const resolve = messageResolver;
@@ -1472,6 +1498,26 @@ let currentTurnHasOutput = false;
 let sessionBrowserToolUsed = false;
 let sessionStorageStateSaved = false;
 
+// PRD 0.2.18 Session Inbox — per-turn binding of inbox metadata.
+//
+// Bound when the message generator yields a queued item that carries inboxMeta
+// (i.e. the message came in via /api/inbox/drain from a `myagents session send`
+// caller). Read at SDK result event handler: if replyBack=true, the turn's text
+// output is collected and pushed back to the caller via deliverInboxReply().
+//
+// CRITICAL — per-turn semantics, NOT session-level singleton:
+//   - Bound on dequeue (generator yield), not on enqueue (PRD §5.5)
+//   - Read at result handler, then immediately cleared
+//   - Abort path: cleared too, optionally sends a session_aborted reply first
+//   - Multiple consecutive inbox messages each get their own binding via the
+//     same per-turn dequeue path (the next yield overwrites — correct because
+//     SDK persistent session is single-threaded turn execution)
+let currentTurnInboxMeta: import('./inbox/types').InboxTurnMeta | undefined = undefined;
+
+// Accumulator for assistant text blocks within the current turn — used by
+// inbox reply pushback to assemble the reply body. Reset at turn start.
+const currentTurnTextBlocks: string[] = [];
+
 function resetTurnUsage(): void {
   currentTurnUsage = {
     inputTokens: 0,
@@ -1484,6 +1530,9 @@ function resetTurnUsage(): void {
   currentTurnStartTime = null;
   currentTurnToolCount = 0;
   currentTurnHasOutput = false;
+  currentTurnTextBlocks.length = 0;
+  // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
+  // (generator yield) and cleared at result handler / abort path.
 }
 
 // ===== MCP Configuration =====
@@ -4455,6 +4504,13 @@ function appendTextChunk(chunk: string): void {
     return;
   }
 
+  // PRD 0.2.18 Session Inbox — accumulate text for reply pushback if this turn
+  // has an inbox binding. Capture before the message-append so we get the same
+  // post-filter text that the model emitted.
+  if (currentTurnInboxMeta) {
+    currentTurnTextBlocks.push(chunk);
+  }
+
   const message = ensureAssistantMessage();
   if (typeof message.content === 'string') {
     message.content += chunk;
@@ -6019,6 +6075,11 @@ export async function enqueueUserMessage(
   // Pattern A — IM trace ID. Forwarded from /api/im/chat (Rust generates at edge).
   // Desktop / cron / heartbeat callers omit this — those paths get no IM identity.
   requestId?: string,
+  // PRD 0.2.18 Session Inbox — inbox metadata for cross-session messages.
+  // Present when message came in via /api/inbox/drain (caller sent through
+  // `myagents session send`). Carries reply-back instruction + caller identity;
+  // bound per-turn at generator yield, read at result handler for reply pushback.
+  inboxMeta?: import('./inbox/types').InboxTurnMeta,
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await sessionTerminationPromise 需要数秒），
@@ -6475,6 +6536,7 @@ export async function enqueueUserMessage(
       resolve: () => {},  // No-op: no one is awaiting
       attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
       requestId,
+      inboxMeta,
     };
 
     // (v0.2.12 mid-turn injection) Lockstep yield. Only one queued message
@@ -6577,6 +6639,7 @@ export async function enqueueUserMessage(
     wasQueued: false,
     resolve: () => {},  // No-op: no one is awaiting
     requestId,
+    inboxMeta,
   };
 
   if (!isSessionActive()) {
@@ -9259,6 +9322,35 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
         handleMessageComplete();
 
+        // PRD 0.2.18 Session Inbox — turn-end reply pushback.
+        // If this turn was triggered by an inbox message with replyBack=true,
+        // collect the turn's text + error and push back to caller session.
+        // Fire-and-forget: don't await (network errors logged but not surfaced).
+        if (currentTurnInboxMeta) {
+          const replyMeta = currentTurnInboxMeta;
+          // Clear immediately to prevent the next turn from inheriting (per-turn
+          // semantics — multiple inbox messages each get their own binding).
+          currentTurnInboxMeta = undefined;
+          const replyText = currentTurnTextBlocks.join('').trim();
+          currentTurnTextBlocks.length = 0;
+          const replyError = resultMessage.is_error
+            ? {
+                code: 'turn_failed',
+                message:
+                  resultMessage.result ||
+                  (resultMessage.errors?.join('; ') ?? 'turn ended with error'),
+              }
+            : undefined;
+          void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
+            deliverInboxReply(sessionId, replyMeta, {
+              text: replyText,
+              error: replyError,
+            }),
+          ).catch((err) =>
+            console.error('[inbox] result-handler reply pushback failed:', err),
+          );
+        }
+
         // PRD #134 — clear `forkFrom` only once we've VERIFIED the SDK has
         // persisted the forked conversation to its on-disk store. "First
         // non-error result" is necessary but not sufficient: the SDK's
@@ -9723,6 +9815,19 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     isStreamingMessage = true;
     // Pattern B+G: push this user message's requestId onto the FIFO queue.
     pushPendingRequest(item.requestId);
+
+    // PRD 0.2.18 Session Inbox — per-turn binding (read at result handler /
+    // abort path). Bound here at generator yield (NOT at enqueue), so the
+    // mutable always reflects the turn that's actually about to execute.
+    // Cleared at result handler / abort path; if a subsequent yield happens
+    // before clear, the new binding overwrites — that's correct because SDK
+    // persistent session yields one turn at a time.
+    currentTurnInboxMeta = item.inboxMeta;
+    if (currentTurnInboxMeta) {
+      console.log(
+        `[inbox] Bound turn inboxMeta from=${currentTurnInboxMeta.fromSessionId} replyBack=${currentTurnInboxMeta.replyBack} msgId=${currentTurnInboxMeta.originalMessageId}`,
+      );
+    }
 
     // Modality re-check at dequeue (see prior comment in pre-fix file).
     const yieldedMessage = stripUnsupportedModalityBlocks(item.message, currentModel);
