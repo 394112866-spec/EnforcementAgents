@@ -9346,9 +9346,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           assistant_message_id: lastAssistant?.id,
         });
 
-        // Server-side unified analytics: covers all sources (desktop/cron/im)
+        // Server-side unified analytics: covers all sources (desktop/cron/im).
+        // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
+        // `session_new` event to reconstruct full per-session funnels (entry surface
+        // → first message → token cost → tool usage → outcome).
         trackServer('ai_turn_complete', {
           source: currentScenario.type,
+          session_id: sessionId,
           platform: currentScenario.type === 'im' ? currentScenario.platform : null,
           runtime: 'builtin',
           model: currentTurnUsage.model ?? null,
