@@ -154,10 +154,16 @@ label { font-size: 12px; font-weight: 600; color: var(--widget-text-secondary); 
         // blocked / failed CDN never stalls the chain; a watchdog covers the
         // rare case where a hung connection fires neither event.
         var advanced = false;
-        var advance = function() { if (advanced) return; advanced = true; runNext(); };
+        var timer = null;
+        var advance = function() {
+          if (advanced) return;
+          advanced = true;
+          if (timer) clearTimeout(timer);
+          runNext();
+        };
         s.addEventListener('load', advance);
         s.addEventListener('error', advance);
-        setTimeout(advance, 10000);
+        timer = setTimeout(advance, 10000);
         old.parentNode.replaceChild(s, old);
       } else {
         s.textContent = old.textContent;
@@ -181,7 +187,7 @@ label { font-size: 12px; font-weight: 600; color: var(--widget-text-secondary); 
       }
     }
 
-    if (e.data.type === 'widget:finalize') {
+    if (e.data.type === 'widget:finalize' && !finalized) {
       finalized = true;
       var newHtml = e.data.html;
       // Always rebuild DOM on finalize — streaming updates had scripts stripped,

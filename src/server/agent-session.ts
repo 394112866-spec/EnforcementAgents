@@ -9732,9 +9732,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const rewindAnchorWasSent = errorMessage.includes('No message found with message.uuid')
       && pendingResumeSessionAt !== undefined;
 
-    // Rewind-mode "No message found" recovery (issue #189). Gated on sessionRegistered
-    // because the rewind path is only valid for an already-registered session.
-    if (errorMessage.includes('No message found with message.uuid') && sessionRegistered) {
+    // Rewind-mode "No message found" recovery (issue #189). Fires when the session
+    // is registered, OR whenever there is a stale in-memory rewind anchor to clear —
+    // even on an unregistered (fresh) fork. A fresh fork can carry a rewind anchor:
+    // rewindSession() sets pendingResumeSessionAt for any UUID in currentSessionUuids
+    // (disk-seeded from the copied messages), regardless of sessionRegistered. If that
+    // anchor is then rejected by the SDK while sessionRegistered=false, gating purely on
+    // sessionRegistered would skip this branch AND the fork branch below (rewindAnchorWasSent
+    // is true) — neither anchor clears and every retry resends the same UUID (the #220
+    // loop class, fresh-fork sub-case). Clearing an in-memory anchor is safe in any
+    // registration state, so allow it whenever pendingResumeSessionAt is set.
+    if (errorMessage.includes('No message found with message.uuid')
+      && (sessionRegistered || pendingResumeSessionAt !== undefined)) {
       const rejectedUuid = pendingResumeSessionAt;
       console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
       pendingResumeSessionAt = undefined;

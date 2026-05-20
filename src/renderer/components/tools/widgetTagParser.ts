@@ -95,8 +95,10 @@ function findNextWidget(masked: string, original: string): FoundWidget | null {
       // Contract-compliant placement — trust it (may still be streaming, no close yet).
       return { openStart, openEnd, title: m[1] || '', closeIdx, isComplete: closeIdx !== -1 };
     }
-    // Mid-line: require a real closed widget whose body opens with an HTML tag.
-    if (closeIdx !== -1 && original.slice(openEnd, closeIdx).trimStart().startsWith('<')) {
+    // Mid-line: require a real closed widget whose body opens with an element
+    // tag (`<` + a letter — so an HTML comment `<!--`, a stray `</`, or prose
+    // don't qualify).
+    if (closeIdx !== -1 && /^<[a-zA-Z]/.test(original.slice(openEnd, closeIdx).trimStart())) {
       return { openStart, openEnd, title: m[1] || '', closeIdx, isComplete: true };
     }
     // Otherwise a bare mention — leave it in the text and keep scanning.

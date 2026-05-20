@@ -15,6 +15,21 @@ export function getChannelById(agent: AgentConfig, channelId: string): ChannelCo
   return agent.channels?.find(c => c.id === channelId);
 }
 
+/**
+ * Whether a channel has the credentials its runtime needs to start — mirrors the
+ * per-type requirements ChannelWizard enforces at creation. Single source of truth
+ * for "can this channel be enabled", shared by the detail-view toggle (specific
+ * toast) and `startAndEnableAgentChannel` (hard guard). Refusing to enable a
+ * credential-less channel prevents persisting `enabled=true` for something
+ * `auto_start_all_enabled_agent_channels` would then fail to launch on every boot.
+ */
+export function channelHasCredentials(ch: ChannelConfig): boolean {
+  if (ch.type === 'feishu') return Boolean(ch.feishuAppId && ch.feishuAppSecret);
+  if (ch.type === 'dingtalk') return Boolean(ch.dingtalkClientId && ch.dingtalkClientSecret);
+  if (ch.type.startsWith('openclaw:')) return Boolean(ch.openclawPluginId);
+  return Boolean(ch.botToken);
+}
+
 export function getAgentByWorkspacePath(config: AppConfig, workspacePath: string): AgentConfig | undefined {
   const normalized = workspacePath.replace(/\\/g, '/');
   return config.agents?.find(a => a.workspacePath.replace(/\\/g, '/') === normalized);
@@ -593,6 +608,14 @@ export async function startAndEnableAgentChannel(
     if (channels[cIdx].enabled === true) {
       // Already enabled — atomicModifyConfig will skip the write.
       return config;
+    }
+    // Refuse to enable a credential-less channel: persisting enabled=true here
+    // would make auto_start_all_enabled_agent_channels retry an unstartable
+    // channel on every boot. The detail-view path checks this first (and shows a
+    // specific toast); this guard also covers the list-view start button, which
+    // has no precheck (issue #219 review).
+    if (!channelHasCredentials(channels[cIdx])) {
+      throw new Error(`startAndEnableAgentChannel: channel ${channelId} is missing required credentials`);
     }
     channels[cIdx] = { ...channels[cIdx], enabled: true };
     agents[aIdx] = { ...agents[aIdx], channels };

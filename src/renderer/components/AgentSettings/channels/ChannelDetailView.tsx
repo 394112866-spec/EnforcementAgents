@@ -15,7 +15,7 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { getEffectiveModelAliases, getProviderModels, isProviderEnabled } from '@/config/types';
-import { patchAgentConfig, invokeStartAgentChannel, stopAndDisableAgentChannel, startAndEnableAgentChannel } from '@/config/services/agentConfigService';
+import { patchAgentConfig, invokeStartAgentChannel, stopAndDisableAgentChannel, startAndEnableAgentChannel, channelHasCredentials } from '@/config/services/agentConfigService';
 import { resolveEffectiveConfig } from '../../../../shared/types/agent';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
 import FeishuCredentialInput from '../../ImSettings/components/FeishuCredentialInput';
@@ -344,14 +344,7 @@ export default function ChannelDetailView({
                 }
             } else {
                 const ch = channelRef.current;
-                const creds = ch.type === 'feishu'
-                    ? (ch.feishuAppId && ch.feishuAppSecret)
-                    : ch.type === 'dingtalk'
-                        ? (ch.dingtalkClientId && ch.dingtalkClientSecret)
-                        : ch.type.startsWith('openclaw:')
-                            ? !!ch.openclawPluginId
-                            : ch.botToken;
-                if (!creds) {
+                if (!channelHasCredentials(ch)) {
                     toastRef.current.error(ch.type === 'telegram' ? '请先配置 Bot Token' : '请先配置应用凭证');
                     setToggling(false);
                     return;

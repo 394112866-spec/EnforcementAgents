@@ -155,6 +155,14 @@ describe('widget tag false-positive guards', () => {
     expect(parseWidgetTags(input)).toEqual([{ type: 'text', content: input }]);
   });
 
+  // Mid-line acceptance requires the body to open with a real element tag, so a
+  // body that starts with an HTML comment (or other non-element) stays prose.
+  test('mid-line tag whose body opens with an HTML comment stays text', () => {
+    const input = 'see <generative-ui-widget><!-- note -->x</generative-ui-widget> here';
+    expect(hasWidgetTags(input)).toBe(false);
+    expect(parseWidgetTags(input)).toEqual([{ type: 'text', content: input }]);
+  });
+
   test('mid-line bare mention before a real line-start widget does not swallow it', () => {
     const input = [
       'Mentioning <generative-ui-widget> inline here.',
