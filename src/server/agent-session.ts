@@ -8451,6 +8451,22 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     let streamEventDeltaCount = 0;
     let streamEventTokenTotal = 0;
 
+    // #227 — track which background-task ids have already produced a terminal
+    // `chat:task-notification` broadcast in THIS SDK session, so subsequent
+    // task_updated/task_notification messages for the same id don't fire
+    // duplicate broadcasts. See the background-task lifecycle handler block
+    // below (~L8763) for the full architectural rationale (SDK exposes two
+    // independent channels for the same logical event; we forward whichever
+    // arrives first and suppress the rest).
+    //
+    // Lifetime = one for-await loop = one SDK session = one task registry.
+    // Tasks can't cross SDK-session boundaries (the registry is in-process to
+    // the CLI subprocess), so resetting per-session is correct. No bounded-cap
+    // logic needed: the renderer's backgroundTaskStatus.ts has its own LRU,
+    // and a single session is realistically bounded to << 1000 background
+    // sub-agents.
+    const terminalBroadcastedTaskIds = new Set<string>();
+
     // ── API response watchdog ──────────────────────────────────────────
     // Detects hung API connections AND hung MCP tool calls.
     // Heartbeat (15s ping) keeps the SSE alive, so Rust's 60s read_timeout
@@ -8698,10 +8714,36 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       // Handle background task lifecycle (SDK Task tool with run_in_background)
       // Gated behind type === 'system' to avoid unnecessary property access on high-frequency stream_events
+      //
+      // #227 — SDK exposes TWO independent channels for the same logical
+      // "task is done" event:
+      //   1. `task_notification` (user/parent-prompt channel, statuses
+      //      'completed' | 'failed' | 'stopped'). NOT guaranteed for every
+      //      terminal path — it's emitted from the CLI's internal
+      //      `mode:'task-notification'` queue, which can fail to fire when
+      //      e.g. the parent session ends before the queue is drained, or
+      //      when the task is killed via task_updated without an explicit
+      //      `TaskStop` tool call.
+      //   2. `task_updated` (state-machine patch channel, terminal statuses
+      //      'completed' | 'failed' | 'killed'). Reliably emitted for every
+      //      state transition — this is the authoritative "task is done"
+      //      signal per the SDK contract. Killed→stopped normalization
+      //      matches what the CLI itself does when synthesizing
+      //      task_notification (see CLI `f9=A8(Fq)?Fq==='killed'?'stopped':Fq`).
+      //
+      // We forward whichever arrives first, deduped per task_id via
+      // `terminalBroadcastedTaskIds`. The renderer's TabProvider appends a
+      // `task-notification-<taskId>` history message on each event — without
+      // sidecar-side dedup, the happy path (both events fire) would create
+      // duplicate history rows with the same id. Dual investigation: Claude
+      // root-traced via session JSONL evidence + binary string surface;
+      // Codex independently confirmed the channel separation in the SDK
+      // type contract.
       if (sdkMessage.type === 'system') {
         const taskMsg = sdkMessage as { subtype?: string; task_id?: string;
           tool_use_id?: string; description?: string; task_type?: string;
-          status?: string; summary?: string; output_file?: string };
+          status?: string; summary?: string; output_file?: string;
+          patch?: { status?: string; error?: string; description?: string } };
         if (taskMsg.subtype === 'task_started' && taskMsg.task_id) {
           console.log(`[agent] Background task started: ${taskMsg.task_id} — ${taskMsg.description}`);
           broadcast('chat:task-started', {
@@ -8711,14 +8753,56 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             taskType: taskMsg.task_type,
           });
         } else if (taskMsg.subtype === 'task_notification' && taskMsg.task_id) {
-          console.log(`[agent] Background task ${taskMsg.status}: ${taskMsg.task_id} — ${taskMsg.summary}`);
-          broadcast('chat:task-notification', {
-            taskId: taskMsg.task_id,
-            toolUseId: taskMsg.tool_use_id,
-            status: taskMsg.status,
-            summary: taskMsg.summary,
-            outputFile: taskMsg.output_file,
-          });
+          if (terminalBroadcastedTaskIds.has(taskMsg.task_id)) {
+            // task_updated terminal already broadcast for this task — suppress
+            // the notification-channel duplicate. This is the common happy
+            // path: SDK emits task_updated{completed} immediately then
+            // task_notification{completed} after the queue drains.
+            console.log(`[agent] Background task notification ${taskMsg.status} suppressed (already terminal-broadcast via task_updated): ${taskMsg.task_id}`);
+          } else {
+            terminalBroadcastedTaskIds.add(taskMsg.task_id);
+            console.log(`[agent] Background task ${taskMsg.status}: ${taskMsg.task_id} — ${taskMsg.summary}`);
+            broadcast('chat:task-notification', {
+              taskId: taskMsg.task_id,
+              toolUseId: taskMsg.tool_use_id,
+              status: taskMsg.status,
+              summary: taskMsg.summary,
+              outputFile: taskMsg.output_file,
+            });
+          }
+        } else if (taskMsg.subtype === 'task_updated' && taskMsg.task_id) {
+          const patchStatus = taskMsg.patch?.status;
+          // Only terminal patches are actionable for the renderer's "task
+          // done" signal. Non-terminal patches (pending/running) leave the
+          // UI in its current state.
+          if (patchStatus === 'completed' || patchStatus === 'failed' || patchStatus === 'killed') {
+            if (terminalBroadcastedTaskIds.has(taskMsg.task_id)) {
+              console.log(`[agent] Background task patch ${patchStatus} suppressed (already terminal-broadcast): ${taskMsg.task_id}`);
+            } else {
+              terminalBroadcastedTaskIds.add(taskMsg.task_id);
+              // Map 'killed' → 'stopped': the renderer's
+              // `backgroundTaskStatus.ts::TERMINAL` set is
+              // {completed, error, failed, stopped} and knows nothing about
+              // 'killed'. Aligning with the SDK CLI's own normalization
+              // keeps the renderer vocab stable.
+              const normalized = patchStatus === 'killed' ? 'stopped' : patchStatus;
+              const errorSummary = taskMsg.patch?.error ?? '';
+              console.log(`[agent] Background task ${normalized} (via task_updated): ${taskMsg.task_id} — patch.status=${patchStatus}${errorSummary ? ` error=${errorSummary}` : ''}`);
+              broadcast('chat:task-notification', {
+                taskId: taskMsg.task_id,
+                // task_updated.patch doesn't carry tool_use_id. The
+                // renderer resolves via the toolUseId↔taskId mapping
+                // registered at task_started time (registerBackgroundTask);
+                // if registration was never seen (e.g. tab opened mid-run
+                // with state lost), backgroundTaskStatus.ts parks the
+                // status in its orphan pool for later reconciliation.
+                toolUseId: undefined,
+                status: normalized,
+                summary: errorSummary,
+                outputFile: '',
+              });
+            }
+          }
         }
 
         // Handle API retry events (v0.2.77+) — show retry status to user
