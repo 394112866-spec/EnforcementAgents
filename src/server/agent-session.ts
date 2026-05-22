@@ -3016,6 +3016,25 @@ const pendingEnterPlanMode = new Map<string, {
 }>();
 
 /**
+ * True while the turn is blocked on a HUMAN response — a permission prompt,
+ * AskUserQuestion, or plan-mode approval. The inactivity watchdog treats this
+ * as a PAUSED state, not a hung turn: the user's think time is not turn
+ * inactivity, and the SDK emits no events while it awaits the canUseTool
+ * resolver. Without this, a >10-minute deliberation (e.g. the user steps away
+ * mid-permission-prompt) false-fires the watchdog and aborts the turn right as,
+ * or before, they answer — despite the comment claiming no wall-clock timeout.
+ * (High-2, cross-review. The wake-lock added alongside the suspension-aware
+ * watchdog only stops the machine SLEEPING during interactive turns; it does
+ * not stop the inactivity clock from counting the human wait.)
+ */
+function hasPendingInteractiveRequest(): boolean {
+  return pendingPermissions.size > 0
+    || pendingAskUserQuestions.size > 0
+    || pendingExitPlanMode.size > 0
+    || pendingEnterPlanMode.size > 0;
+}
+
+/**
  * Validate AskUserQuestion input structure
  */
 function isValidAskUserQuestionInput(input: unknown): input is AskUserQuestionInput {
@@ -8523,6 +8542,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       const { fire: noRecentSdkEvents, suspendedMs } = watchdog.evaluateTick();
       if (suspendedMs > 0) {
         console.log(`[agent] Watchdog: credited ${Math.round(suspendedMs / 1000)}s process suspension (sleep/App Nap) — not counted as inactivity`);
+      }
+
+      // Paused on a human (permission prompt / AskUserQuestion / plan approval):
+      // their think time is not turn inactivity. Re-baseline the idle clock so
+      // the post-answer budget is fresh, and skip the kill. evaluateTick already
+      // advanced lastTickAt this tick, so the wait ending produces no spurious
+      // suspension credit. (High-2, cross-review.)
+      if (hasPendingInteractiveRequest()) {
+        watchdog.markActivity();
+        return;
       }
 
       if (noRecentSdkEvents) {

@@ -351,6 +351,15 @@ function resetWatchdog(): void {
     if (suspendedMs > 0) {
       console.log(`[external-session] Watchdog: credited ${Math.round(suspendedMs / 1000)}s process suspension (sleep/App Nap) — not counted as inactivity`);
     }
+    // Paused on a human: pendingExternalInteractiveRequests holds the open
+    // permission card / AskUserQuestion. The user's think time is not runtime
+    // inactivity — re-baseline the idle clock so the post-answer budget is fresh
+    // and skip the kill. evaluateTick already advanced lastTickAt, so the wait
+    // ending produces no spurious suspension credit. (High-2, cross-review.)
+    if (pendingExternalInteractiveRequests.size > 0) {
+      externalWatchdog.markActivity();
+      return;
+    }
     if (!fire) return;
     clearWatchdog();
     console.error('[external-session] Watchdog: no runtime activity for 10 minutes of active time, killing process');

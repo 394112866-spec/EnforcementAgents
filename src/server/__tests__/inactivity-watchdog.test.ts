@@ -130,6 +130,33 @@ describe('InactivityWatchdog', () => {
     expect(fired).toBe(false);
   });
 
+  it('does not fire across a long human wait when the owner pauses it each tick (High-2)', () => {
+    // Models the watchdog gate for interactive turns: while a permission prompt
+    // / AskUserQuestion / plan approval is pending, the owner re-baselines the
+    // idle clock every tick (markActivity) instead of letting it count down, so
+    // the user's think time is never mistaken for a hung turn.
+    const clock = fakeClock();
+    const wd = new InactivityWatchdog({ timeoutMs: TIMEOUT, intervalMs: INTERVAL, now: clock.now });
+    wd.markActivity();
+
+    // 30 minutes (3× the timeout) of the human deliberating on a prompt.
+    for (let i = 0; i < 60; i++) {
+      clock.advance(INTERVAL);
+      const { fire } = wd.evaluateTick();
+      expect(fire).toBe(false);
+      wd.markActivity(); // owner: "still waiting on the human, not inactivity"
+    }
+
+    // User answers → owner stops pausing. A genuine post-answer hang must still
+    // be caught: ~10 min of no activity with on-schedule ticks fires.
+    let fired = false;
+    for (let i = 0; i < 25 && !fired; i++) {
+      clock.advance(INTERVAL);
+      fired = wd.evaluateTick().fire;
+    }
+    expect(fired).toBe(true);
+  });
+
   it('treats moderate scheduling jitter (sub-2x) as active inactivity, not suspension', () => {
     const clock = fakeClock();
     const wd = new InactivityWatchdog({ timeoutMs: TIMEOUT, intervalMs: INTERVAL, now: clock.now });
