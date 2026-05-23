@@ -966,7 +966,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Resolved values hoisted out of `try` so the `catch` failure-recovery path
     // (PRD 0.2.7 §4.5) can reference them when restoring the launcher draft.
     const builtinSel = initialMessage.builtinSelection;
-    const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime ? runtimePermissionMode : permissionMode)) as PermissionMode;
+    // #244 (cross-review W2): when the initialMessage carries no explicit
+    // permissionMode (internal producers — task-alignment / support / fork —
+    // unlike the launcher, don't set it), derive the builtin mode from config
+    // rather than the raw `permissionMode` state, which is still the mount-time
+    // 'auto' default if useConfig() hasn't resolved yet. projectSynced:false
+    // forces the agent→project→global fallback (there's no explicit choice to
+    // honor on this auto-send).
+    const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime
+      ? runtimePermissionMode
+      : resolveBuiltinPermissionMode({
+          projectSynced: false,
+          statePermissionMode: permissionMode,
+          agentPermissionMode: currentAgent?.permissionMode as string | undefined,
+          projectPermissionMode: currentProject?.permissionMode,
+          defaultPermissionMode: config.defaultPermissionMode,
+        }))) as PermissionMode;
     const effectiveModel = isExternalRuntime
       ? (initialMessage.runtimeModel ?? runtimeModel)
       : (builtinSel?.model ?? selectedModel);

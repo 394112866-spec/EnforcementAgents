@@ -3667,6 +3667,7 @@ export default function TabProvider({
                 connectedSseSessionId: connectedSseSessionIdRef.current,
                 alreadyLoaded: initialSessionLoadedRef.current,
                 prevSessionId: prevSessionIdRef.current,
+                sessionActiveOrStreaming: isSessionActiveRef.current || isStreamingRef.current,
             })) return;
             console.warn(`[TabProvider ${tabId}] SSE attach timed out for ${target} after ${SSE_ATTACH_FALLBACK_MS}ms — loading session over HTTP (degraded)`);
             initialSessionLoadedRef.current = true;

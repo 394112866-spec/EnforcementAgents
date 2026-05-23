@@ -297,6 +297,16 @@ export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason
   ) {
     return { ok: false, reason: `Blocked private/loopback host: ${host}` };
   }
+  // IPv6 forms the lexical IPv4 checks above miss (cross-review W1). Node keeps
+  // the brackets in `hostname` for IPv6 literals — strip + lower-case first.
+  //  - `::` / unspecified routes to loopback on many stacks.
+  //  - `::ffff:<v4>` (IPv4-mapped IPv6, dotted `::ffff:127.0.0.1` OR hex
+  //    `::ffff:7f00:1`) is a classic SSRF bypass for loopback/private targets;
+  //    reject the literal form outright — legitimate image hosts don't use it.
+  const h6 = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h6 === '::' || h6 === '::0' || /^(?:0:){7}0$/.test(h6) || h6.startsWith('::ffff:')) {
+    return { ok: false, reason: `Blocked private/loopback host: ${host}` };
+  }
   return { ok: true };
 }
 

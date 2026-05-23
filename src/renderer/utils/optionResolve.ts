@@ -107,10 +107,20 @@ export function shouldDegradedLoad(args: {
   connectedSseSessionId: string | null;
   alreadyLoaded: boolean;
   prevSessionId: string | null | undefined;
+  /**
+   * Session is mid-turn (system-init seen or chunks streaming). Mirrors the
+   * unified session-load effect's "Do NOT call loadSession while AI is
+   * responding" guard — refetching would clobber the live history (the
+   * backend turn itself survives, since loadSession is read-only and a
+   * same-session switch short-circuits, but the UI would flash). Keep the
+   * invariant in one place rather than relying on that server-side mercy.
+   */
+  sessionActiveOrStreaming: boolean;
 }): boolean {
   if (!args.mounted) return false;
   if (args.currentSessionId !== args.target) return false; // session switched away
   if (args.connectedSseSessionId === args.target) return false; // SSE attached after all
   if (args.alreadyLoaded && args.prevSessionId === args.target) return false; // already loaded
+  if (args.sessionActiveOrStreaming) return false; // don't reload mid-turn
   return true;
 }

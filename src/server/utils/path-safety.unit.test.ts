@@ -66,10 +66,9 @@ describe.skipIf(isWin)('validateExternalReadPathNode — symlink escape (real fs
   it('rejects a path whose parent symlink resolves into a blacklisted dir', () => {
     const evil = path.join(dir, 'evil_link');
     // Target /usr (a REAL dir on both macOS and Linux). NB: /etc and /var are
-    // symlinks to /private/* on macOS, and the blacklist lists /etc|/var but not
-    // /private/* — so an /etc target would slip the realpath recheck on macOS
-    // (a known gap; for tool attachments the positive allow-list still catches
-    // it). /usr exercises the realpath→blacklist recheck portably.
+    // symlinks to /private/* on macOS; the macOS blacklist now ALSO lists
+    // /private/etc | /private/var (gap closed — see the /private/* tests
+    // below). /usr exercises the realpath→blacklist recheck portably here.
     symlinkSync('/usr', evil); // evil_link → /usr
     // realpath(evil_link/bin) === /usr/bin → blacklist catches /usr.
     const res = validateExternalReadPathNode(path.join(evil, 'bin'));
@@ -84,5 +83,14 @@ describe.skipIf(isWin)('validateExternalReadPathNode — symlink escape (real fs
     symlinkSync('/etc', evil); // /etc → /private/etc on macOS
     const res = validateExternalReadPathNode(path.join(evil, 'hosts'));
     expect(res.ok).toBe(false); // realpath → /private/etc/hosts → blacklisted
+  });
+
+  // Companion to the /private/etc case: /var → /private/var on macOS too, so
+  // the /private/var blacklist entry must reject a symlink-escape into it.
+  it.runIf(process.platform === 'darwin')('rejects realpath-escape into /private/var (macOS /var symlink)', () => {
+    const evil = path.join(dir, 'var_link');
+    symlinkSync('/var', evil); // /var → /private/var on macOS
+    const res = validateExternalReadPathNode(path.join(evil, 'log'));
+    expect(res.ok).toBe(false); // realpath → /private/var/log → blacklisted
   });
 });

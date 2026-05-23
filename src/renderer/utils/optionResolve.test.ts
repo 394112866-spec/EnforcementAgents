@@ -111,10 +111,15 @@ describe('shouldDegradedLoad (#235)', () => {
     connectedSseSessionId: null as string | null,
     alreadyLoaded: false,
     prevSessionId: 's0' as string | null | undefined,
+    sessionActiveOrStreaming: false,
   };
 
   it('fires when SSE never attached and the session is unchanged (the bug)', () => {
     expect(shouldDegradedLoad(base)).toBe(true);
+  });
+
+  it('does not fire while the session is mid-turn (active/streaming)', () => {
+    expect(shouldDegradedLoad({ ...base, sessionActiveOrStreaming: true })).toBe(false);
   });
 
   it('does not fire after unmount', () => {

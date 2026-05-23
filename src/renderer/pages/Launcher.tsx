@@ -322,6 +322,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Declared AFTER launcherLastUsed effect so project settings take priority on initial load.
     // Priority: project setting > global default (launcherLastUsed is global, not per-workspace)
     // Depends on individual fields (not just .id) so it re-runs when Chat's patchProject updates them.
+    // NOTE (#234): when a workspace is selected this effect is the primary author
+    // of launcherProviderId (always agent → project default), so it already keeps
+    // the launcher current after an agent-provider change. The consistency check
+    // in the launcherLastUsed restore effect above is load-bearing for the
+    // no-workspace / pre-this-effect window — both must agree; don't "simplify"
+    // by deleting one.
     useEffect(() => {
         if (isLoading || !selectedWorkspace) return;
         // For external runtimes, model and permission come from runtimeConfig.

@@ -152,7 +152,11 @@ export async function inspectPluginSource(
 export function pathsEqual(a: string, b: string): boolean {
   const ra = resolve(a);
   const rb = resolve(b);
-  return process.platform === 'win32'
+  // Case-fold on the case-insensitive default file systems (NTFS on Windows,
+  // APFS/HFS+ on macOS). Without darwin case-folding, a `file://…/Test-Echo`
+  // source vs a `test-echo` install dir would miss sameDirInstall and then
+  // collide on renameSync → the original #239 409 (cross-review W3).
+  return process.platform === 'win32' || process.platform === 'darwin'
     ? ra.toLowerCase() === rb.toLowerCase()
     : ra === rb;
 }
