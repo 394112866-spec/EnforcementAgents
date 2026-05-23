@@ -60,6 +60,7 @@ import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
+import { resolveBuiltinPermissionMode } from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
 import type { RichDocKind } from '../../shared/fileTypes';
@@ -890,9 +891,28 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const effectiveModel = isExternalRuntime
     ? (runtimeModel ?? runtimeModels?.find(m => m.isDefault)?.value)
     : selectedModel;
+  // #244: the `permissionMode` useState initializer runs while useConfig() is
+  // still loading, and the one-time project-sync effect that corrects it fires
+  // AFTER first paint — so a fresh-tab first send could ship the stale 'auto'.
+  // resolveBuiltinPermissionMode() falls back to the configured value until the
+  // state becomes authoritative. Drives BOTH the selector display and the send,
+  // so the two never disagree.
+  //
+  // "Authoritative" = projectSyncedRef (project-sync effect ran, or the user
+  // toggled the control) OR hadInitialMessage (launcher handoff — autoSend sets
+  // `permissionMode` from initialMessage.permissionMode and the project-sync
+  // effect is skipped, so trusting state here preserves the launcher's explicit
+  // choice instead of overriding it with the agent default).
+  const permissionStateAuthoritative = projectSyncedRef.current || hadInitialMessage.current;
   const effectivePermissionMode = isExternalRuntime
     ? runtimePermissionMode as PermissionMode
-    : permissionMode;
+    : resolveBuiltinPermissionMode({
+        projectSynced: permissionStateAuthoritative,
+        statePermissionMode: permissionMode,
+        agentPermissionMode: currentAgent?.permissionMode as string | undefined,
+        projectPermissionMode: currentProject?.permissionMode,
+        defaultPermissionMode: config.defaultPermissionMode,
+      });
 
   const buildCronRuntimeConfig = useCallback((): RuntimeConfig | undefined => {
     if (!isExternalRuntime) return undefined;
@@ -987,6 +1007,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             setRuntimePermissionMode(initialMessage.permissionMode);
           } else {
             setPermissionMode(initialMessage.permissionMode);
+            // #244: the launcher choice is now the authoritative builtin mode —
+            // mark synced so effectivePermissionMode trusts state and doesn't
+            // re-derive from the agent default (the project-sync effect is
+            // skipped on initialMessage tabs).
+            projectSyncedRef.current = true;
           }
         }
         if (isExternalRuntime) {
@@ -2088,6 +2113,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Handle permission mode change — same dual-write policy as handleModelChange.
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
+    // Lock in the user's explicit choice: mark the project as synced so
+    // `effectivePermissionMode` (#244) trusts `permissionMode` from here on
+    // instead of re-deriving from config — even if the one-time project-sync
+    // effect hasn't fired yet (user toggled before config finished loading).
+    projectSyncedRef.current = true;
     setPermissionMode(mode);
     void persistTabConfigChange({ permissionMode: mode });
   }, [persistTabConfigChange]);
