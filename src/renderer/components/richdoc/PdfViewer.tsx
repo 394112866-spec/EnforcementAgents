@@ -6,9 +6,17 @@
  * scanned contract doesn't pin memory. No text layer (read-only canvas; text
  * selection is an explicit non-goal, §9).
  *
+ * Zoom is applied by scaling each page holder's dimensions NUMERICALLY (not via
+ * CSS `zoom`): the canvas fills the holder via `width:100%`, so the holder's
+ * pixel size sets the display size. This is load-bearing — CSS `zoom`/`transform`
+ * on the observed content corrupts IntersectionObserver geometry, which made the
+ * recycler clear visible pages → blank pages at non-100% zoom. With numeric
+ * sizing the observer sees true geometry. Backing store stays at base×dpr, so
+ * zoom-in is crisp up to ~2× (dpr≤2) and softens gracefully beyond.
+ *
  * The page DOM is built imperatively (an island React doesn't manage) because
- * pdf.js renders into raw canvas elements; cleanup tears it down with the
- * wrapper and cancels in-flight render tasks.
+ * pdf.js renders into raw canvas elements; cleanup tears it down and cancels
+ * in-flight render tasks.
  */
 import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
@@ -23,6 +31,30 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
   const contentRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const { zoom, zoomIn, zoomOut, reset } = useZoom(scrollRef);
+
+  // Base (zoom=1) render width + page-1 aspect height, set during render and read
+  // by the zoom effect to resize holders without re-rendering.
+  const zoomRef = useRef(zoom);
+  const baseWidthRef = useRef(0);
+  const estHeightRef = useRef(0);
+
+  // Resize existing holders when zoom changes — rendered canvases (width:100%)
+  // scale with the holder; placeholders keep proportional scroll height. Also
+  // mirrors zoom into the ref here (in an effect, not during render) for the
+  // render-effect's holder sizing / recycle path.
+  useEffect(() => {
+    zoomRef.current = zoom;
+    const content = contentRef.current;
+    if (!content || !baseWidthRef.current) return;
+    const w = baseWidthRef.current * zoom;
+    const h = estHeightRef.current * zoom;
+    content.querySelectorAll<HTMLElement>('[data-page]').forEach((holder) => {
+      // Explicit width (not maxWidth+w-full) so zoom-in can exceed the container
+      // and scroll horizontally; mx-auto centers when narrower.
+      holder.style.width = `${w}px`;
+      if (!holder.firstChild) holder.style.minHeight = `${h}px`;
+    });
+  }, [zoom]);
 
   useEffect(() => {
     const scroller = scrollRef.current;
@@ -48,7 +80,7 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         if (!canvas.getContext('2d')) return;
         canvas.width = Math.floor(viewport.width * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
-        canvas.style.width = '100%';
+        canvas.style.width = '100%'; // display size set by holder (zoom-scaled)
         canvas.style.height = 'auto';
         holder.style.minHeight = '';
         holder.replaceChildren(canvas);
@@ -96,6 +128,9 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         first.cleanup();
         if (cancelled) return; // cleanup will destroy the loading task
 
+        baseWidthRef.current = width;
+        estHeightRef.current = estHeight;
+
         observer = new IntersectionObserver(
           (entries) => {
             for (const entry of entries) {
@@ -109,7 +144,7 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
                 // The 300px margin keeps this from thrashing on normal scrolling;
                 // re-entering the viewport re-renders (fast, cached).
                 holder.replaceChildren();
-                holder.style.minHeight = `${estHeight}px`;
+                holder.style.minHeight = `${estHeight * zoomRef.current}px`;
                 rendered.delete(pageNum);
               }
             }
@@ -117,16 +152,17 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
           { root: scroller, rootMargin: '300px 0px' },
         );
 
+        const z = zoomRef.current;
         const frag = document.createDocumentFragment();
         for (let n = 1; n <= pdf.numPages; n++) {
           const holder = document.createElement('div');
           holder.dataset.page = String(n);
-          holder.style.maxWidth = `${width}px`;
-          holder.style.minHeight = `${estHeight}px`;
+          holder.style.width = `${width * z}px`;
+          holder.style.minHeight = `${estHeight * z}px`;
           // `bg-white` is a deliberate design-token exemption: a PDF page is
           // physical white paper, and tinting it with --paper-* would distort the
           // rendered colors. Native viewers (Chrome/Preview) show white pages too.
-          holder.className = 'mx-auto mb-3 w-full bg-white shadow-sm';
+          holder.className = 'mx-auto mb-3 bg-white shadow-sm';
           frag.appendChild(holder);
           observer.observe(holder);
         }
@@ -150,8 +186,10 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
   }, [bytes, onError, onEmpty]);
 
   return (
-    <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
-      <div ref={contentRef} style={{ zoom }} />
+    <div className="relative h-full overflow-hidden bg-[var(--paper-elevated)]">
+      <div ref={scrollRef} className="h-full overflow-auto overscroll-contain p-4">
+        <div ref={contentRef} />
+      </div>
       {loading ? (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--ink-muted)]">
           <Loader2 className="h-5 w-5 animate-spin" />

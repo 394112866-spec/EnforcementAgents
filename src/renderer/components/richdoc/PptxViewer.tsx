@@ -96,8 +96,10 @@ export default function PptxViewer({ bytes, onError, onEmpty }: RichDocSubViewer
   }, [bytes, onError, onEmpty]);
 
   return (
-    <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
-      <div ref={contentRef} className="mx-auto" />
+    <div className="relative h-full overflow-hidden bg-[var(--paper-elevated)]">
+      <div ref={scrollRef} className="h-full overflow-auto overscroll-contain p-4">
+        <div ref={contentRef} className="mx-auto" />
+      </div>
       {loading ? (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--ink-muted)]">
           <Loader2 className="h-5 w-5 animate-spin" />

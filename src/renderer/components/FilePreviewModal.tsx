@@ -398,6 +398,15 @@ export default function FilePreviewModal({
         return monacoLanguage;
     }, [size, monacoLanguage]);
 
+    // Disable Monaco soft-wrap for files with a pathologically long line (data /
+    // minified JSON): the advanced word-wrap layout of a 30k+ char line is the
+    // dominant load cost and such lines are unreadable wrapped anyway. Derived from
+    // the loaded `content` (stable per file), not live keystrokes.
+    const monacoWordWrap = useMemo<'on' | 'off'>(
+        () => (/[^\n]{20000,}/.test(content) ? 'off' : 'on'),
+        [content],
+    );
+
     // ─── Save logic (shared by auto-save and manual save) ────────────────────
     // Stable refs for save dependencies to avoid re-creating callbacks
     const onSaveRef = useRef(onSave);
@@ -758,6 +767,7 @@ export default function FilePreviewModal({
                             value={editContent}
                             onChange={handleDirectEditChange}
                             language={effectiveMonacoLanguage}
+                            wordWrap={monacoWordWrap}
                             onSave={handleManualFlush}
                             initialLineNumber={initialLineNumber}
                             onQuote={monacoQuote}
@@ -804,6 +814,7 @@ export default function FilePreviewModal({
                         value={isDirectEdit ? editContent : savedContent}
                         onChange={isDirectEdit ? handleDirectEditChange : noop}
                         language={effectiveMonacoLanguage}
+                        wordWrap={monacoWordWrap}
                         readOnly={!isDirectEdit}
                         onSave={isDirectEdit ? handleManualFlush : undefined}
                         initialLineNumber={initialLineNumber}

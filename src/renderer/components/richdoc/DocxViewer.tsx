@@ -82,8 +82,10 @@ export default function DocxViewer({ bytes, onError }: RichDocSubViewerProps) {
   }, [bytes, onError]);
 
   return (
-    <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
-      <div ref={containerRef} className="mx-auto" style={{ zoom }} />
+    <div className="relative h-full overflow-hidden bg-[var(--paper-elevated)]">
+      <div ref={scrollRef} className="h-full overflow-auto overscroll-contain p-4">
+        <div ref={containerRef} className="mx-auto" style={{ zoom }} />
+      </div>
       {loading ? (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--ink-muted)]">
           <Loader2 className="h-5 w-5 animate-spin" />
