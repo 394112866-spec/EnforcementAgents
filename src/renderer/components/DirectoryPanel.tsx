@@ -1412,6 +1412,23 @@ const DirectoryPanel = memo(
       }
     };
 
+    // Tree node paths are workspace-relative (Rust `tree.rs` emits the relative
+    // path; root node is ""). Join with the absolute `agentDir` to get the real
+    // filesystem path users expect from "copy path". Mirrors Chat.tsx's join.
+    const toAbsolutePath = (relPath: string): string => {
+      if (!agentDir) return relPath;
+      if (!relPath) return agentDir;
+      const sep = agentDir.includes("\\") ? "\\" : "/";
+      return `${agentDir}${sep}${relPath}`;
+    };
+
+    const handleCopyPath = (relPath: string, label: string) => {
+      navigator.clipboard
+        .writeText(toAbsolutePath(relPath))
+        .then(() => toast.success(label))
+        .catch(() => toast.error("复制失败"));
+    };
+
     const handleRename = async (oldPath: string, newName: string) => {
       try {
         await fileService.rename({ oldPath, newName });
@@ -1748,12 +1765,7 @@ const DirectoryPanel = memo(
           {
             label: "复制文件夹路径",
             icon: <Copy className="h-4 w-4" />,
-            onClick: () => {
-              navigator.clipboard
-                .writeText(node.path)
-                .then(() => toast.success("已复制文件夹路径"))
-                .catch(() => toast.error("复制失败"));
-            },
+            onClick: () => handleCopyPath(node.path, "已复制文件夹路径"),
           },
           {
             label: "引用",
@@ -1815,12 +1827,7 @@ const DirectoryPanel = memo(
           {
             label: "复制文件路径",
             icon: <Copy className="h-4 w-4" />,
-            onClick: () => {
-              navigator.clipboard
-                .writeText(node.path)
-                .then(() => toast.success("已复制文件路径"))
-                .catch(() => toast.error("复制失败"));
-            },
+            onClick: () => handleCopyPath(node.path, "已复制文件路径"),
           },
           {
             label: "重命名",
