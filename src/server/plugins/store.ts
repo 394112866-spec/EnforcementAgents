@@ -284,6 +284,13 @@ export async function installPlugin(
   // Skipped for the register-in-place case (nothing to copy).
   onProgress?.('writing');
   let staged = false;
+  // True once the staging dir has been renamed INTO installPath but before the
+  // config write commits. If withConfigLock then fails to persist config.json
+  // (the rename happens inside the modifier, the write happens after it), the
+  // dir is on disk with no config row → a future install of the same name hits
+  // TARGET_EXISTS forever. On failure we roll the rename back. Never set for the
+  // sameDirInstall path (no rename — must not delete the user's own dir).
+  let movedIntoPlace = false;
   try {
     if (!sameDirInstall) {
       writePluginToDisk(stagingPath, tree, rootPath);
@@ -364,6 +371,7 @@ export async function installPlugin(
           }
           renameSync(stagingPath, installPath);
           staged = false; // staging dir is gone — don't double-GC
+          movedIntoPlace = true; // installPath now exists; roll back if commit fails
         }
       } catch (err) {
         installingNames.delete(manifest.name);
@@ -388,6 +396,14 @@ export async function installPlugin(
     // Translate inner errors into PluginStoreError shape and clean staging.
     if (staged) {
       try { removeInstallPath(stagingPath); } catch { /* best-effort */ }
+    }
+    // W4 rollback: the rename into installPath succeeded but the config commit
+    // did not (withConfigLock is atomic, so reaching here means config.json was
+    // NOT updated). Remove the orphaned dir so a retry isn't blocked by its own
+    // half-finished prior attempt. Only fires on the rename path — sameDirInstall
+    // never sets movedIntoPlace, so the user's own dir is never deleted.
+    if (movedIntoPlace) {
+      try { removeInstallPath(installPath); } catch { /* best-effort */ }
     }
     if (err instanceof PluginInstallError) {
       throw new PluginStoreError(err.message, err.code, err.statusCode);

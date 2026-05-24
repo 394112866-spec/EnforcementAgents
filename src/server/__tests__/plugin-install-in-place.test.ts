@@ -91,6 +91,32 @@ describe('plugin install — register-in-place (#239)', () => {
       statusCode: 409,
     });
   });
+
+  it('rolls back the moved dir when the config commit fails (W4 — no orphan)', () => {
+    // External source (rename path, not in-place).
+    const external = join(home, 'elsewhere', 'rollback-plugin');
+    mkdirSync(join(external, '.claude-plugin'), { recursive: true });
+    writeFileSync(
+      join(external, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'rollback-plugin', version: '1.0.0' }, null, 2),
+      'utf-8',
+    );
+
+    // Force the config commit to fail AFTER the staging→install rename:
+    // replace config.json with a (non-empty) DIRECTORY so withConfigLock's final
+    // renameSync(config.json.tmp → config.json) throws.
+    const configPath = join(home, '.myagents', 'config.json');
+    rmSync(configPath, { force: true });
+    mkdirSync(configPath, { recursive: true });
+    writeFileSync(join(configPath, 'block'), 'x', 'utf-8');
+
+    const installPath = join(home, '.myagents', 'plugins', 'rollback-plugin');
+    return expect(installPlugin(pathToFileURL(external).href)).rejects.toBeTruthy().then(() => {
+      // The half-finished dir must be rolled back — not left as an orphan that
+      // would 409 every future install of the same name.
+      expect(existsSync(installPath)).toBe(false);
+    });
+  });
 });
 
 describe('pathsEqual (#239 helper)', () => {
