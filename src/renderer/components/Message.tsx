@@ -329,7 +329,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               <span>via {SOURCE_LABELS[imSource as MessageSource] ?? imSource}</span>
             </div>
           )}
-          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
+          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
             {/* System injection tag badge */}
             {systemTag && (
               <div className="mb-2 -mt-0.5">
@@ -354,14 +354,14 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                 </div>
               )}
               {hasText && (
-                <div className="text-[var(--ink)]">
+                <div className="user-message-content text-[var(--ink)]">
                   <Markdown preserveNewlines>{userContent}</Markdown>
                 </div>
               )}
             </div>
             {/* Expand button with gradient fade — gradient overlaps bottom of content */}
             {!userExpanded && userOverflows && (
-              <div className="relative z-10 -mx-4 -mb-3 -mt-14">
+              <div className="relative z-10 -mx-4 -mb-4 -mt-14">
                 <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--paper-elevated)] to-transparent" />
                 <button
                   type="button"
