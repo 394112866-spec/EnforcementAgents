@@ -930,8 +930,8 @@ const SYSTEM_SKILLS: readonly string[] = [
   // v10: ultra-research removed — not generic enough.
   'download-anything',
   // v8: see commands.rs::SYSTEM_SKILLS — agent-browser promoted to system
-  // skill so existing users get the updated self-install SKILL.md after
-  // the bundled CLI is removed.
+  // skill so existing users get the updated command-local npm self-install
+  // SKILL.md after the bundled CLI is removed.
   'agent-browser',
   // v9: myagents-cli — global skill that exposes the entire `myagents`
   // CLI surface (cron / task / mcp / model / agent / runtime / skill /
