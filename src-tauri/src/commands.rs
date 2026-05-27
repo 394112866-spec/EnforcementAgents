@@ -1734,6 +1734,51 @@ fn network_probe_result(
     }
 }
 
+fn is_loopback_http_url(url: &reqwest::Url) -> bool {
+    match url.host_str() {
+        Some(host) => {
+            let normalized = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_ascii_lowercase();
+            if normalized == "localhost"
+                || normalized == "localhost.localdomain"
+                || normalized.ends_with(".localhost")
+            {
+                return true;
+            }
+            normalized
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod network_probe_tests {
+    use super::is_loopback_http_url;
+
+    fn parsed(url: &str) -> reqwest::Url {
+        reqwest::Url::parse(url).expect("test URL parses")
+    }
+
+    #[test]
+    fn detects_loopback_provider_urls() {
+        assert!(is_loopback_http_url(&parsed("http://localhost:11434/v1")));
+        assert!(is_loopback_http_url(&parsed("https://127.0.0.1:8443/v1")));
+        assert!(is_loopback_http_url(&parsed("http://[::1]:8080/v1")));
+        assert!(is_loopback_http_url(&parsed("http://lmstudio.localhost:1234")));
+    }
+
+    #[test]
+    fn leaves_external_provider_urls_on_proxy_path() {
+        assert!(!is_loopback_http_url(&parsed("https://api.example.com/v1")));
+        assert!(!is_loopback_http_url(&parsed("http://192.168.1.2:8080/v1")));
+    }
+}
+
 fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         return "timeout";
@@ -1829,22 +1874,43 @@ pub async fn cmd_probe_provider_network(url: String) -> Result<NetworkProbeResul
     let target_url = parsed.to_string();
     ulog_info!("[network-probe] Probing provider URL {}", target_url);
 
-    #[allow(clippy::disallowed_methods)]
-    let builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .redirect(reqwest::redirect::Policy::limited(5));
-    let client = match crate::proxy_config::build_client_with_proxy(builder) {
-        Ok(client) => client,
-        Err(error) => {
-            return Ok(network_probe_result(
-                false,
-                "provider_http",
-                "proxy_config_error",
-                "网络代理配置无效，请检查代理设置",
-                Some(error),
-                None,
-                target_url,
-            ));
+    let client = if is_loopback_http_url(&parsed) {
+        match crate::local_http::builder()
+            .timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                return Ok(network_probe_result(
+                    false,
+                    "provider_http",
+                    "network_error",
+                    "本地供应商探测客户端创建失败",
+                    Some(error.to_string()),
+                    None,
+                    target_url,
+                ));
+            }
+        }
+    } else {
+        #[allow(clippy::disallowed_methods)]
+        let builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::limited(5));
+        match crate::proxy_config::build_client_with_proxy(builder) {
+            Ok(client) => client,
+            Err(error) => {
+                return Ok(network_probe_result(
+                    false,
+                    "provider_http",
+                    "proxy_config_error",
+                    "网络代理配置无效，请检查代理设置",
+                    Some(error),
+                    None,
+                    target_url,
+                ));
+            }
         }
     };
 
@@ -1870,12 +1936,12 @@ pub async fn cmd_probe_proxy(
     let host = host.trim().to_string();
     let proxy_url = format!("{}://{}:{}", protocol, host, port);
 
-    if !matches!(protocol.as_str(), "http" | "socks5") {
+    if !matches!(protocol.as_str(), "http" | "https" | "socks5") {
         return Ok(network_probe_result(
             false,
             "local_proxy",
             "invalid_proxy",
-            "代理协议无效，请选择 HTTP 或 SOCKS5",
+            "代理协议无效，请选择 HTTP、HTTPS 或 SOCKS5",
             None,
             None,
             proxy_url,

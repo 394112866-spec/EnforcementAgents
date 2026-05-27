@@ -40,6 +40,56 @@ struct ChannelRuntimeRefs {
     consumers: ImConsumers,
 }
 
+fn target_consumer_needs_cancel(
+    prior_session_id: Option<&str>,
+    prior_sidecar_port: Option<u16>,
+    next_session_id: &str,
+    next_sidecar_port: u16,
+) -> bool {
+    let session_changed = prior_session_id
+        .map(|prior| prior != next_session_id)
+        .unwrap_or(false);
+    let port_changed = prior_sidecar_port
+        .map(|prior| prior != next_sidecar_port)
+        .unwrap_or(false);
+    session_changed || port_changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_consumer_needs_cancel;
+
+    #[test]
+    fn target_consumer_cancel_is_required_when_handover_replaces_session() {
+        assert!(target_consumer_needs_cancel(
+            Some("prior-session"),
+            Some(31415),
+            "next-session",
+            31415,
+        ));
+    }
+
+    #[test]
+    fn target_consumer_cancel_is_required_when_sidecar_port_changes() {
+        assert!(target_consumer_needs_cancel(
+            Some("same-session"),
+            Some(31415),
+            "same-session",
+            31416,
+        ));
+    }
+
+    #[test]
+    fn target_consumer_can_be_reused_for_same_session_and_port() {
+        assert!(!target_consumer_needs_cancel(
+            Some("same-session"),
+            Some(31415),
+            "same-session",
+            31415,
+        ));
+    }
+}
+
 /// UTF-8-safe shortener for log lines and notification text. The bare
 /// `&s[..8.min(s.len())]` form is byte-indexed and panics if byte 8 lands
 /// inside a multi-byte char. Session ids are UUIDs so the panic never
@@ -401,10 +451,11 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     // `is_new=true` means the old sidecar was dead and a fresh one was minted
     // on a different port; binding the IM channel to the stale port would
     // route subsequent messages into a closed socket.
-    let (chat_id, prior_session_id, active_sessions_after_upsert) = {
+    let (chat_id, prior_session_id, prior_sidecar_port, active_sessions_after_upsert) = {
         let mut router = router_arc.lock().await;
         let prior = router.peer_session_snapshot(&target_session_key);
         let prior_session_id = prior.as_ref().map(|p| p.session_id.clone());
+        let prior_sidecar_port = prior.as_ref().map(|p| p.sidecar_port);
         let (source_type, source_id) = parse_session_key(&target_session_key);
         let source_display_name = prior
             .as_ref()
@@ -425,7 +476,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             last_active: Instant::now(),
         });
 
-        (source_id, prior_session_id, router.active_sessions())
+        (source_id, prior_session_id, prior_sidecar_port, router.active_sessions())
     };
     ulog_info!(
         "[handover] step5 peer_session upserted: chat_id={} prior_session={}",
@@ -443,6 +494,33 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             "[handover] step5 persist target channel health after upsert failed: {}",
             e
         );
+    }
+
+    if target_consumer_needs_cancel(
+        prior_session_id.as_deref(),
+        prior_sidecar_port,
+        &sessionId,
+        target_port,
+    ) {
+        if let Some(target_runtime) = channel_runtimes
+            .iter()
+            .find(|runtime| runtime.channel_id == channelId)
+        {
+            if let Some(handle) = target_runtime
+                .consumers
+                .lock()
+                .await
+                .remove(&target_session_key)
+            {
+                handle
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                ulog_info!(
+                    "[handover] step5 cancelled stale target ImEventConsumer for {}",
+                    target_session_key
+                );
+            }
+        }
     }
 
     // ----- 5b. Enforce one channel binding per session.

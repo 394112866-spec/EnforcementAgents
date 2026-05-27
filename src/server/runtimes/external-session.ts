@@ -41,6 +41,7 @@ import { resolveLastRealUserMessagePreview } from '../utils/session-message-prev
 import {
   EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
   externalRuntimeWatchdogTimeoutMs,
+  estimatedContextTokensFromMessages,
   observedContextTokens,
 } from './external-watchdog-policy';
 
@@ -354,9 +355,24 @@ const externalWatchdog = new InactivityWatchdog({
 });
 let currentWatchdogTimeoutMs = EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS;
 
+function usageForWatchdogBudget(): MessageUsage | null {
+  const usage = currentTurnUsage ?? lastPersistedRuntimeUsageTotals;
+  if (currentTurnEstimatedInputTokens <= 0) return usage;
+
+  const observed = observedContextTokens(usage);
+  if (observed >= currentTurnEstimatedInputTokens) return usage;
+
+  return {
+    ...(usage ?? { outputTokens: 0 }),
+    inputTokens: Math.max(usage?.inputTokens ?? 0, currentTurnEstimatedInputTokens),
+    outputTokens: usage?.outputTokens ?? 0,
+    model: (usage?.model ?? lastRuntimeReportedModel) || lastModel || undefined,
+  };
+}
+
 function refreshWatchdogTimeout(): void {
   const runtimeType = activeRuntime?.type ?? getCurrentRuntimeType();
-  const usageForBudget = currentTurnUsage ?? lastPersistedRuntimeUsageTotals;
+  const usageForBudget = usageForWatchdogBudget();
   const nextTimeoutMs = externalRuntimeWatchdogTimeoutMs(runtimeType, usageForBudget);
   if (nextTimeoutMs === currentWatchdogTimeoutMs) return;
 
@@ -415,6 +431,14 @@ let lastTurnSucceeded = false;
 // ─── Token usage accumulation ───
 type ExternalTurnUsage = MessageUsage & { semantics?: 'delta' | 'running_total' };
 let currentTurnUsage: ExternalTurnUsage | null = null;
+let currentTurnEstimatedInputTokens = 0;
+
+function seedTurnWatchdogEstimate(extraText = ''): void {
+  const runtimeType = activeRuntime?.type ?? getCurrentRuntimeType();
+  currentTurnEstimatedInputTokens = runtimeType === 'codex'
+    ? estimatedContextTokensFromMessages(allSessionMessages, extraText)
+    : 0;
+}
 
 /** Reset all per-turn accumulators */
 function resetTurnAccumulators(): void {
@@ -427,6 +451,7 @@ function resetTurnAccumulators(): void {
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   currentTurnUsage = null;
+  currentTurnEstimatedInputTokens = 0;
 }
 
 function buildPersistedTurnUsage(): MessageUsage | undefined {
@@ -1059,13 +1084,10 @@ async function _doStartExternalSession(options: {
   lastTurnSucceeded = false;  // Reset — success only set after turn_complete
   resetTurnAccumulators();
   // Watchdog is per-turn, not per-process. Pre-warm (no initialMessage) leaves
-  // the process idle awaiting a user message — starting a 10-min timer here
-  // would fire a bogus "timed out" toast if the user takes >10 min to type.
-  // The real watchdog is armed when the first turn begins (Case 3 in
-  // sendExternalMessage, or the initialMessage block below).
-  if (options.initialMessage) {
-    resetWatchdog();
-  }
+  // the process idle awaiting a user message — starting a timer here would fire
+  // a bogus "timed out" toast if the user takes >10 min to type. The real
+  // watchdog is armed when the first turn begins (Case 3 in sendExternalMessage,
+  // or the initialMessage block below).
   currentTurnStartTime = 0;
   // Track latest config for resume
   if (options.model !== undefined) lastModel = options.model;
@@ -1091,6 +1113,8 @@ async function _doStartExternalSession(options: {
     earlyBroadcastedUserMsg = null;  // Consumed
     allSessionMessages.push(userMsg);
     resetTurnAccumulators();
+    seedTurnWatchdogEstimate();
+    resetWatchdog();
     currentTurnStartTime = Date.now();
 
     // Persist user message immediately (crash safety — don't wait for turn_complete)
@@ -1403,6 +1427,7 @@ export async function sendExternalMessage(
     turnCompleted = false;
     lastTurnSucceeded = false;  // Reset for this turn (prevents stale text on failure)
     resetTurnAccumulators();
+    seedTurnWatchdogEstimate();
     resetWatchdog();  // Start watchdog for this turn (Case 3 bypasses startExternalSession)
     currentTurnStartTime = Date.now();
 

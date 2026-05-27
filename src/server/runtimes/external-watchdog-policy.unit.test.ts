@@ -5,6 +5,7 @@ import {
   CODEX_LONG_CONTEXT_MAX_TIMEOUT_MS,
   CODEX_LONG_CONTEXT_MIN_TIMEOUT_MS,
   EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
+  estimatedContextTokensFromMessages,
   externalRuntimeWatchdogTimeoutMs,
   observedContextTokens,
 } from './external-watchdog-policy';
@@ -56,5 +57,14 @@ describe('observedContextTokens', () => {
     };
 
     expect(observedContextTokens(usage)).toBe(6_000);
+  });
+});
+
+describe('estimatedContextTokensFromMessages', () => {
+  it('estimates pre-usage context size from persisted message content and the new turn text', () => {
+    expect(estimatedContextTokensFromMessages([
+      { content: 'a'.repeat(16) },
+      { content: '界'.repeat(4) },
+    ], 'b'.repeat(4))).toBe(8);
   });
 });

@@ -46,6 +46,7 @@ export function useAgentStatuses(enabled = true) {
   const [statuses, setStatuses] = useState<AgentStatusMap>({});
   const [loading, setLoading] = useState(true);
   const isMountedRef = useRef(true);
+  const requestSeqRef = useRef(0);
   // Keep latest fetch fn in a ref so interval always calls current version
   const fetchRef = useRef<() => void>(() => {});
 
@@ -61,15 +62,16 @@ export function useAgentStatuses(enabled = true) {
     }
 
     const fetchStatuses = async () => {
+      const requestSeq = ++requestSeqRef.current;
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         const result = await invoke<AgentStatusMap>('cmd_all_agents_status');
-        if (isMountedRef.current) {
+        if (isMountedRef.current && requestSeq === requestSeqRef.current) {
           setStatuses(result);
           setLoading(false);
         }
       } catch {
-        if (isMountedRef.current) {
+        if (isMountedRef.current && requestSeq === requestSeqRef.current) {
           setLoading(false);
         }
       }
