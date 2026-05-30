@@ -554,16 +554,17 @@ const ANTHROPIC_MODELS: ModelEntity[] = [
   // on every turn (reproduced 2026-05-07). Opus 4.x stays at 1M because
   // Anthropic enables 1M-by-default on Opus subscription tiers.
   { model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
+  { model: 'claude-opus-4-8', modelName: 'Claude Opus 4.8', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
   { model: 'claude-opus-4-7', modelName: 'Claude Opus 4.7', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
   { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
   { model: 'claude-haiku-4-5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
 ];
 
-/** Anthropic 官方默认别名（对齐 SDK 0.2.111 内置默认：opus47/sonnet46/haiku45）。
+/** Anthropic 官方默认别名（对齐 SDK 0.3.158 内置默认：opus48/sonnet46/haiku45）。
  *  显式 pin 可避免未来 SDK 默认变动时用户体验突变。 */
 const ANTHROPIC_ALIASES = {
   sonnet: 'claude-sonnet-4-6',
-  opus: 'claude-opus-4-7',
+  opus: 'claude-opus-4-8',
   haiku: 'claude-haiku-4-5',
 } as const;
 

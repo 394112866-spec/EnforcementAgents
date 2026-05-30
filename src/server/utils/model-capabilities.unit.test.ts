@@ -29,6 +29,7 @@ describe('applyContextWindowSuffix — registry-independent guards', () => {
 
 describe('applyContextWindowSuffix — threshold via preset registry', () => {
   it('tags a >=1M preset model with [1m]', () => {
+    expect(applyContextWindowSuffix('claude-opus-4-8')).toBe('claude-opus-4-8[1m]');
     expect(applyContextWindowSuffix('claude-opus-4-7')).toBe('claude-opus-4-7[1m]');
     expect(applyContextWindowSuffix('claude-opus-4-6')).toBe('claude-opus-4-6[1m]');
   });
