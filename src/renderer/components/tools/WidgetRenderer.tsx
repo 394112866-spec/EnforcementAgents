@@ -13,6 +13,7 @@ import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { openExternal } from '@/utils/openExternal';
 import { buildWidgetCssVars } from './widgetCssVars';
 import { buildSandboxHtml } from './widgetSandboxHtml';
+import { detectWidgetLibraries, loadLibrarySources, inlineWidgetLibraries } from './widgetLibraries';
 
 // ===== Module-level height cache (survives component lifecycle) =====
 // Key: first 300 chars of widget_code (past the common <style> prefix).
@@ -99,6 +100,38 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
     iframeRef.current?.contentWindow?.postMessage(msg, '*');
   }, []);
 
+  // Finalize: send the full widget HTML, first swapping any known CDN library
+  // <script src> (Chart.js …) for the app's locally-bundled source injected
+  // inline — so it runs under the sandbox's 'unsafe-inline' regardless of the
+  // inherited CSP (Chromium/WebView2 blocks the external CDN script; see
+  // widgetLibraries.ts) and with no network dependency (offline / slow CDN).
+  // Async only when a library is actually referenced; text/SVG widgets send
+  // synchronously with zero overhead. Library sources are preloaded during the
+  // streaming preview (effect below) so this is already resolved at finalize,
+  // preserving "render the moment the widget block completes".
+  const sendFinalize = useCallback((code: string) => {
+    const libs = detectWidgetLibraries(code);
+    if (libs.length === 0) {
+      sendToIframe({ type: 'widget:finalize', html: code });
+      lastSentHtml.current = code;
+      return;
+    }
+    void loadLibrarySources(libs)
+      .then((sources) => inlineWidgetLibraries(code, sources))
+      .catch(() => code) // bundling failed → original code (CDN where allowed + visible error)
+      .then((html) => {
+        sendToIframe({ type: 'widget:finalize', html });
+        lastSentHtml.current = html;
+      });
+  }, [sendToIframe]);
+
+  // Preload bundled library sources as soon as a widget references one (even
+  // mid-stream), so the cache is warm by the time it finalizes.
+  useEffect(() => {
+    const libs = detectWidgetLibraries(widgetCode);
+    if (libs.length > 0) void loadLibrarySources(libs);
+  }, [widgetCode]);
+
   // Handle messages from iframe
   useEffect(() => {
     function onMessage(e: MessageEvent) {
@@ -111,9 +144,13 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
           iframeReady.current = true;
           // If we already have content, send it immediately
           if (widgetCode && !hasFinalized.current) {
-            const html = isStreaming ? sanitizeForStreaming(widgetCode) : widgetCode;
-            sendToIframe({ type: isStreaming ? 'widget:update' : 'widget:finalize', html });
-            lastSentHtml.current = html;
+            if (isStreaming) {
+              const html = sanitizeForStreaming(widgetCode);
+              sendToIframe({ type: 'widget:update', html });
+              lastSentHtml.current = html;
+            } else {
+              sendFinalize(widgetCode);
+            }
           }
           break;
 
@@ -143,7 +180,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
 
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [widgetCode, isStreaming, sendToIframe, cacheKey, title]);
+  }, [widgetCode, isStreaming, sendToIframe, sendFinalize, cacheKey, title]);
 
   // Theme change observer — push updated CSS vars to iframe when dark/light mode toggles
   useEffect(() => {
@@ -161,12 +198,16 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
     if (!iframeReady.current) {
       iframeReady.current = true;
       if (widgetCode) {
-        const html = isStreaming ? sanitizeForStreaming(widgetCode) : widgetCode;
-        sendToIframe({ type: isStreaming ? 'widget:update' : 'widget:finalize', html });
-        lastSentHtml.current = html;
+        if (isStreaming) {
+          const html = sanitizeForStreaming(widgetCode);
+          sendToIframe({ type: 'widget:update', html });
+          lastSentHtml.current = html;
+        } else {
+          sendFinalize(widgetCode);
+        }
       }
     }
-  }, [widgetCode, isStreaming, sendToIframe]);
+  }, [widgetCode, isStreaming, sendToIframe, sendFinalize]);
 
   // Streaming update: debounced, script-stripped
   useEffect(() => {
@@ -186,15 +227,15 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
     };
   }, [widgetCode, isStreaming, sendToIframe]);
 
-  // Finalize: when streaming ends, send full HTML with scripts
+  // Finalize: when streaming ends, send full HTML with scripts (bundled libs
+  // inlined via sendFinalize).
   useEffect(() => {
     if (!isStreaming && widgetCode && iframeReady.current && !hasFinalized.current) {
       hasFinalized.current = true;
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      sendToIframe({ type: 'widget:finalize', html: widgetCode });
-      lastSentHtml.current = widgetCode;
+      sendFinalize(widgetCode);
     }
-  }, [isStreaming, widgetCode, sendToIframe]);
+  }, [isStreaming, widgetCode, sendFinalize]);
 
   // Show skeleton until iframe reports real content height (> MIN_HEIGHT)
   const hasVisibleContent = height > MIN_HEIGHT;
