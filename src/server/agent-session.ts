@@ -18,6 +18,7 @@ import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNp
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
+import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
@@ -1517,6 +1518,10 @@ let currentTurnStartTime: number | null = null;
 let currentTurnToolCount = 0;
 // Whether the current turn produced any visible assistant text output
 let currentTurnHasOutput = false;
+// SDK assistant messages can carry a provisional .error even when the final
+// SDK result later succeeds. Keep it turn-local until the authoritative result.
+let currentTurnHadAssistantMessageError = false;
+let currentTurnLastAssistantMessageError: string | null = null;
 // Whether the current turn observed any non-init SDK frame (assistant /
 // user / tool_result / stream_event / result / rate_limit_event etc.).
 // Cheaper signal than currentTurnHasOutput — flips on the FIRST substantive
@@ -1610,6 +1615,8 @@ function resetTurnUsage(): void {
   currentTurnStartTime = null;
   currentTurnToolCount = 0;
   currentTurnHasOutput = false;
+  currentTurnHadAssistantMessageError = false;
+  currentTurnLastAssistantMessageError = null;
   turnHadSubstantiveActivity = false;
   currentTurnTextBlocks.length = 0;
   // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
@@ -9192,8 +9199,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       if (!isApiRetry) {
         const agentError = extractAgentError(sdkMessage);
         if (agentError) {
-          lastAgentError = agentError;
-          broadcast('chat:agent-error', { message: agentError });
+          if (sdkMessage.type === 'assistant') {
+            currentTurnHadAssistantMessageError = true;
+            currentTurnLastAssistantMessageError = agentError;
+            console.warn('[agent] SDK assistant message reported provisional error; waiting for result frame:', agentError);
+          } else {
+            lastAgentError = agentError;
+            broadcast('chat:agent-error', { message: agentError });
+          }
         }
       }
       if (shouldAbortSession) {
@@ -9864,10 +9877,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             cacheCreationInputTokens?: number;
           }>;
         };
+        const resultText = resultMessage.result || '';
 
         // Forward SDK error results to IM callback (prevents "(No Response)")
         if (resultMessage.is_error) {
-          const rawError = resultMessage.result || resultMessage.errors?.join('; ') || '';
+          const rawError = resultText || resultMessage.errors?.join('; ') || currentTurnLastAssistantMessageError || '';
           // Detect image content error — reset session to clear polluted history
           // (applies to both IM and desktop: prevents all subsequent messages from failing)
           // Pattern 1: malformed image block (e.g., wrong content type)
@@ -9901,37 +9915,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               imRequestRegistry.setStatus(failedReq, 'failed');
               imRequestRegistry.unregister(failedReq);
             }
-          }
-        }
-
-        // Surface SDK-level errors that produced no assistant output (e.g. "Unknown skill: xxx").
-        // These results have non-empty result text but no visible assistant text was streamed.
-        // Without this, the user sees nothing — the message just silently completes.
-        // Only show agent-error for is_error results — non-error results from non-streaming
-        // providers are handled in the assistant message handler above.
-        const resultText = resultMessage.result || '';
-        if (resultText && !currentTurnHasOutput && !currentTurnToolCount) {
-          if (resultMessage.is_error) {
-            console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultText);
-            broadcast('chat:agent-error', { message: resultText });
-          } else {
-            // Non-error result text that wasn't captured by streaming or assistant handler
-            // (safety net — should rarely trigger after the assistant handler fix above)
-            console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
-            // Handler first (same pattern as streamed text path)
-            appendTextChunk(resultText);
-            broadcast('chat:message-chunk', resultText);
-          }
-          // Forward to IM event bus (prevents "(No Response)" for SDK failures).
-          // Pattern B+G: pop the head request — the upcoming handleMessageComplete
-          // for this turn will find the head already cleared and skip duplicate
-          // emission. Defensive against handleMessageComplete not running for
-          // is_error / no-output results.
-          emitImEvent('complete', resultText);
-          const completedReq = popPendingRequest();
-          if (completedReq) {
-            imRequestRegistry.setStatus(completedReq, 'completed');
-            imRequestRegistry.unregister(completedReq);
           }
         }
 
@@ -9997,6 +9980,60 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Calculate duration for analytics
         const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : 0;
 
+        // Surface SDK-level errors that produced no assistant output (e.g. "Unknown skill: xxx").
+        // These results have non-empty result text but no visible assistant text was streamed.
+        // Without this, the user sees nothing — the message just silently completes.
+        // Only show agent-error for is_error results — non-error results from non-streaming
+        // providers are handled in the assistant message handler above.
+        const hasResultText = resultText.trim().length > 0;
+        const resultErrorText = (hasResultText ? resultText : '') || resultMessage.errors?.join('; ') || currentTurnLastAssistantMessageError || '';
+        const noOutputResultText = resultMessage.is_error ? resultErrorText : (hasResultText ? resultText : '');
+        if (noOutputResultText && !currentTurnHasOutput && !currentTurnToolCount) {
+          if (resultMessage.is_error) {
+            console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultErrorText);
+            lastAgentError = resultErrorText;
+            broadcast('chat:agent-error', { message: resultErrorText });
+          } else if (resultText) {
+            // Non-error result text that wasn't captured by streaming or assistant handler
+            // (safety net — should rarely trigger after the assistant handler fix above)
+            console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
+            // Handler first (same pattern as streamed text path)
+            appendTextChunk(resultText);
+            broadcast('chat:message-chunk', resultText);
+            currentTurnHasOutput = true;
+          }
+          // Forward to IM event bus (prevents "(No Response)" for SDK failures).
+          // Pattern B+G: pop the head request — the upcoming handleMessageComplete
+          // for this turn will find the head already cleared and skip duplicate
+          // emission. Defensive against handleMessageComplete not running for
+          // is_error / no-output results.
+          emitImEvent('complete', noOutputResultText);
+          const completedReq = popPendingRequest();
+          if (completedReq) {
+            imRequestRegistry.setStatus(completedReq, 'completed');
+            imRequestRegistry.unregister(completedReq);
+          }
+        }
+
+        const emptySuccessfulResult = isEmptySuccessfulSdkResult({
+          isError: resultMessage.is_error,
+          result: resultText,
+          terminalReason: resultMessage.terminal_reason,
+          hasVisibleOutput: currentTurnHasOutput,
+          toolCount: currentTurnToolCount,
+          outputTokens: currentTurnUsage.outputTokens,
+        });
+        const recoveredAssistantMessageError = isRecoveredAssistantMessageError({
+          hadAssistantMessageError: currentTurnHadAssistantMessageError,
+          isError: resultMessage.is_error,
+          terminalReason: resultMessage.terminal_reason,
+          emptySuccessfulResult,
+        });
+
+        if (recoveredAssistantMessageError && currentTurnLastAssistantMessageError) {
+          console.log('[agent] SDK assistant message error recovered by successful result:', currentTurnLastAssistantMessageError);
+        }
+
         // Find the last assistant message's sdkUuid to piggyback on message-complete.
         // This avoids the ID mismatch problem: frontend streaming messages use Date.now()
         // IDs while backend uses messageSequence IDs, so the separate chat:message-sdk-uuid
@@ -10014,72 +10051,97 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent][terminal_reason] ${resultMessage.terminal_reason} scenario=${currentScenario.type} model=${currentTurnUsage.model ?? 'unknown'} duration_ms=${durationMs} tool_count=${currentTurnToolCount}`);
         }
 
-        console.log('[agent][sdk] Broadcasting chat:message-complete');
-        // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
-        broadcast('chat:message-complete', {
-          model: currentTurnUsage.model,
-          input_tokens: currentTurnUsage.inputTokens,
-          output_tokens: currentTurnUsage.outputTokens,
-          cache_read_tokens: currentTurnUsage.cacheReadTokens,
-          cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
-          tool_count: currentTurnToolCount,
-          duration_ms: durationMs,
-          // SDK 0.2.91+ terminal_reason — 前端映射为中文 banner/toast。
-          // 未设置时前端按 `completed` 处理（不显示额外提示）。
-          terminal_reason: resultMessage.terminal_reason,
-          // Piggyback sdkUuid + real message ID so fork button works immediately after streaming.
-          // Frontend streaming messages use Date.now() IDs that don't match backend messageSequence IDs.
-          assistant_sdk_uuid: lastAssistant?.sdkUuid,
-          assistant_message_id: lastAssistant?.id,
-        });
+        if (emptySuccessfulResult) {
+          const emptyResultError = 'AI 未返回任何内容，但 SDK 将本轮标记为完成。请在当前会话重试；如果使用第三方兼容供应商，建议切换模型、减少上下文或压缩后重试。';
+          console.warn(`[agent][empty_result] model=${currentTurnUsage.model ?? 'unknown'} terminal_reason=${resultMessage.terminal_reason ?? 'none'} input=${currentTurnUsage.inputTokens} output=${currentTurnUsage.outputTokens} duration_ms=${durationMs} provisional_error=${currentTurnLastAssistantMessageError ?? 'none'}`);
+          lastAgentError = emptyResultError;
+          broadcast('chat:message-error', emptyResultError);
+          handleMessageError(emptyResultError);
+          if (currentTurnInboxMeta) {
+            const replyMeta = currentTurnInboxMeta;
+            currentTurnInboxMeta = undefined;
+            const replyText = currentTurnTextBlocks.join('').trim();
+            currentTurnTextBlocks.length = 0;
+            void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
+              deliverInboxReply(sessionId, replyMeta, {
+                text: replyText,
+                error: {
+                  code: 'turn_failed',
+                  message: emptyResultError,
+                },
+              }),
+            ).catch((err) =>
+              console.error('[inbox] empty-result reply pushback failed:', err),
+            );
+          }
+        } else {
+          console.log('[agent][sdk] Broadcasting chat:message-complete');
+          // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
+          broadcast('chat:message-complete', {
+            model: currentTurnUsage.model,
+            input_tokens: currentTurnUsage.inputTokens,
+            output_tokens: currentTurnUsage.outputTokens,
+            cache_read_tokens: currentTurnUsage.cacheReadTokens,
+            cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
+            tool_count: currentTurnToolCount,
+            duration_ms: durationMs,
+            // SDK 0.2.91+ terminal_reason — 前端映射为中文 banner/toast。
+            // 未设置时前端按 `completed` 处理（不显示额外提示）。
+            terminal_reason: resultMessage.terminal_reason,
+            // Piggyback sdkUuid + real message ID so fork button works immediately after streaming.
+            // Frontend streaming messages use Date.now() IDs that don't match backend messageSequence IDs.
+            assistant_sdk_uuid: lastAssistant?.sdkUuid,
+            assistant_message_id: lastAssistant?.id,
+          });
 
-        // Server-side unified analytics: covers all sources (desktop/cron/im).
-        // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
-        // `session_new` event to reconstruct full per-session funnels (entry surface
-        // → first message → token cost → tool usage → outcome).
-        trackServer('ai_turn_complete', {
-          source: currentScenario.type,
-          session_id: sessionId,
-          platform: currentScenario.type === 'im' ? currentScenario.platform : null,
-          runtime: 'builtin',
-          model: currentTurnUsage.model ?? null,
-          input_tokens: currentTurnUsage.inputTokens,
-          output_tokens: currentTurnUsage.outputTokens,
-          cache_read_tokens: currentTurnUsage.cacheReadTokens,
-          cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
-          tool_count: currentTurnToolCount,
-          duration_ms: durationMs,
-        });
+          // Server-side unified analytics: covers all sources (desktop/cron/im).
+          // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
+          // `session_new` event to reconstruct full per-session funnels (entry surface
+          // → first message → token cost → tool usage → outcome).
+          trackServer('ai_turn_complete', {
+            source: currentScenario.type,
+            session_id: sessionId,
+            platform: currentScenario.type === 'im' ? currentScenario.platform : null,
+            runtime: 'builtin',
+            model: currentTurnUsage.model ?? null,
+            input_tokens: currentTurnUsage.inputTokens,
+            output_tokens: currentTurnUsage.outputTokens,
+            cache_read_tokens: currentTurnUsage.cacheReadTokens,
+            cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
+            tool_count: currentTurnToolCount,
+            duration_ms: durationMs,
+          });
 
-        handleMessageComplete();
+          handleMessageComplete();
 
-        // PRD 0.2.18 Session Inbox — turn-end reply pushback.
-        // If this turn was triggered by an inbox message with replyBack=true,
-        // collect the turn's text + error and push back to caller session.
-        // Fire-and-forget: don't await (network errors logged but not surfaced).
-        if (currentTurnInboxMeta) {
-          const replyMeta = currentTurnInboxMeta;
-          // Clear immediately to prevent the next turn from inheriting (per-turn
-          // semantics — multiple inbox messages each get their own binding).
-          currentTurnInboxMeta = undefined;
-          const replyText = currentTurnTextBlocks.join('').trim();
-          currentTurnTextBlocks.length = 0;
-          const replyError = resultMessage.is_error
-            ? {
-                code: 'turn_failed',
-                message:
-                  resultMessage.result ||
-                  (resultMessage.errors?.join('; ') ?? 'turn ended with error'),
-              }
-            : undefined;
-          void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
-            deliverInboxReply(sessionId, replyMeta, {
-              text: replyText,
-              error: replyError,
-            }),
-          ).catch((err) =>
-            console.error('[inbox] result-handler reply pushback failed:', err),
-          );
+          // PRD 0.2.18 Session Inbox — turn-end reply pushback.
+          // If this turn was triggered by an inbox message with replyBack=true,
+          // collect the turn's text + error and push back to caller session.
+          // Fire-and-forget: don't await (network errors logged but not surfaced).
+          if (currentTurnInboxMeta) {
+            const replyMeta = currentTurnInboxMeta;
+            // Clear immediately to prevent the next turn from inheriting (per-turn
+            // semantics — multiple inbox messages each get their own binding).
+            currentTurnInboxMeta = undefined;
+            const replyText = currentTurnTextBlocks.join('').trim();
+            currentTurnTextBlocks.length = 0;
+            const replyError = resultMessage.is_error
+              ? {
+                  code: 'turn_failed',
+                  message:
+                    resultMessage.result ||
+                    (resultMessage.errors?.join('; ') ?? 'turn ended with error'),
+                }
+              : undefined;
+            void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
+              deliverInboxReply(sessionId, replyMeta, {
+                text: replyText,
+                error: replyError,
+              }),
+            ).catch((err) =>
+              console.error('[inbox] result-handler reply pushback failed:', err),
+            );
+          }
         }
 
         // PRD #134 — clear `forkFrom` only once we've VERIFIED the SDK has
