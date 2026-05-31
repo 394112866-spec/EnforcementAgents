@@ -6,7 +6,7 @@
 // default and only open on user click (like tool blocks), while the collapsed
 // header still shows the live "思考中…" indicator. This test guards against the
 // auto-expand reappearing.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, fireEvent } from '@testing-library/react';
 
 import ProcessRow from './ProcessRow';
@@ -34,6 +34,16 @@ describe('ProcessRow thinking block expand behaviour', () => {
     expect(screen.queryByText(new RegExp(REASONING, 'i'))).toBeNull();
     fireEvent.click(screen.getByRole('button')); // the header is the only button while collapsed
     expect(screen.getByText(new RegExp(REASONING, 'i'))).toBeTruthy();
+  });
+
+  it('signals onUserExpand when opened, but not when collapsing', () => {
+    const onUserExpand = vi.fn();
+    render(<ProcessRow block={thinkingBlock()} index={0} totalBlocks={1} isStreaming onUserExpand={onUserExpand} />);
+    const btn = screen.getByRole('button');
+    fireEvent.click(btn); // open
+    expect(onUserExpand).toHaveBeenCalledTimes(1);
+    fireEvent.click(btn); // collapse — must NOT re-signal
+    expect(onUserExpand).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a completed thinking block collapsed by default', () => {

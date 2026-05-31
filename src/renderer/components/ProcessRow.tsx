@@ -22,13 +22,18 @@ interface ProcessRowProps {
     index: number;
     totalBlocks: number;
     isStreaming?: boolean;
+    // Called when the user EXPANDS this row. The parent BlockGroup uses it to
+    // suppress its auto-fold for the turn — otherwise folding would unmount a
+    // row the user deliberately opened and silently lose its expanded state.
+    onUserExpand?: () => void;
 }
 
 const ProcessRow = memo(function ProcessRow({
     block,
     index,
     totalBlocks,
-    isStreaming = false
+    isStreaming = false,
+    onUserExpand
 }: ProcessRowProps) {
     // User manually toggled state (null = not toggled, true/false = user choice)
     const [userToggled, setUserToggled] = useState<boolean | null>(null);
@@ -162,7 +167,11 @@ const ProcessRow = memo(function ProcessRow({
     // Handle user click
     const handleToggle = () => {
         if (!hasContent) return;
+        const willExpand = userToggled !== true; // null / false → this click opens it
         setUserToggled(prev => prev === null ? true : !prev);
+        // Signal the parent group on EXPAND so it can pin its layout (stop the
+        // auto-fold that would unmount this row and drop the just-opened state).
+        if (willExpand) onUserExpand?.();
     };
 
     const handleCopyThinking = () => {
