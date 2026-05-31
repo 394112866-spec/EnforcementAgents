@@ -74,6 +74,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
   const lastSentHtml = useRef('');
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasFinalized = useRef(false);
+  const widgetErrorReports = useRef(0);
 
   // Initialize height from cache or default
   const cacheKey = getCacheKey(widgetCode);
@@ -110,6 +111,11 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
   // streaming preview (effect below) so this is already resolved at finalize,
   // preserving "render the moment the widget block completes".
   const sendFinalize = useCallback((code: string) => {
+    // Mark finalized at the React layer too (not just the iframe's own
+    // `!finalized` guard): sendFinalize is only ever the finalize action, and
+    // setting this stops the finalize-effect / any other entry point from
+    // queuing a second (now async) finalize for the same widget.
+    hasFinalized.current = true;
     const libs = detectWidgetLibraries(code);
     if (libs.length === 0) {
       sendToIframe({ type: 'widget:finalize', html: code });
@@ -129,7 +135,10 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
   // mid-stream), so the cache is warm by the time it finalizes.
   useEffect(() => {
     const libs = detectWidgetLibraries(widgetCode);
-    if (libs.length > 0) void loadLibrarySources(libs);
+    // Swallow rejection here — a failed preload is retried at finalize (the
+    // cache evicts rejects), and sendFinalize has its own fallback. Without the
+    // catch a flaky chunk load would surface as a renderer unhandled rejection.
+    if (libs.length > 0) void loadLibrarySources(libs).catch(() => {});
   }, [widgetCode]);
 
   // Handle messages from iframe
@@ -172,8 +181,17 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
           // A script inside the sandboxed widget failed (commonly malformed JS
           // from a weaker model). The iframe shows an inline notice; mirror it
           // here so it also lands in the main console / app logs for debugging
-          // instead of being invisible inside the sandbox.
-          console.warn(`[widget] script failed to run (title=${title || 'untitled'}):`, e.data.message);
+          // instead of being invisible inside the sandbox. Cap + truncate: the
+          // message is arbitrary widget-controlled text and console.warn is
+          // persisted to the unified log on disk, so a looping/hostile widget
+          // (which can postMessage 'widget:error' directly) could flood it.
+          if (widgetErrorReports.current < 5) {
+            widgetErrorReports.current += 1;
+            console.warn(
+              `[widget] script failed to run (title=${title || 'untitled'}):`,
+              String(e.data.message ?? '').slice(0, 300),
+            );
+          }
           break;
       }
     }

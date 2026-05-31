@@ -35,6 +35,11 @@ export interface WidgetLibrary {
   load: () => Promise<string>;
 }
 
+// Only Chart.js is bundled today. D3 / Mermaid / Lucide — the other CDN libs the
+// widget contract names — are NOT here yet, so widgets using them still load from
+// CDN and remain blank on Windows/WebView2 (same inherited-CSP root cause). Add
+// them as registry rows when needed (Mermaid is already an app dep and handled by
+// the chat's fenced-block renderer, so it's rarely needed inside a widget).
 const LIBRARIES: WidgetLibrary[] = [
   {
     name: 'chart.js',
@@ -77,6 +82,12 @@ export function loadLibrarySources(libs: WidgetLibrary[]): Promise<Map<string, s
       let p = sourceCache.get(lib.name);
       if (!p) {
         p = lib.load();
+        // Don't cache a rejection permanently: a transient lazy-chunk load
+        // failure would otherwise blank this library for the rest of the
+        // session (no retry). Evict on reject so the next render re-attempts.
+        p.catch(() => {
+          if (sourceCache.get(lib.name) === p) sourceCache.delete(lib.name);
+        });
         sourceCache.set(lib.name, p);
       }
       return [lib.name, await p] as const;
@@ -96,7 +107,11 @@ export function inlineWidgetLibraries(code: string, sources: Map<string, string>
   return code.replace(re, (whole, src: string) => {
     const lib = LIBRARIES.find((l) => l.test(src) && sources.has(l.name));
     if (!lib) return whole;
-    const safe = sources.get(lib.name)!.replace(/<\/script>/gi, '<\\/script>');
+    // Break any `</script` sequence (not only `</script>`): the HTML tokenizer
+    // ends a <script> text node on `</script` followed by `>`, `/`, whitespace
+    // or EOF, so escaping the prefix is version-proof. A no-op for the current
+    // minified UMD (contains no `</script`), defensive for future bundled libs.
+    const safe = sources.get(lib.name)!.replace(/<\/script/gi, '<\\/script');
     return `<script data-inlined-lib="${lib.name}">${safe}</script>`;
   });
 }

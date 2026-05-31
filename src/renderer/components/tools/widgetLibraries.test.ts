@@ -61,6 +61,15 @@ describe('inlineWidgetLibraries', () => {
     expect(out).not.toContain('"</script>";'); // raw closer from source is gone
   });
 
+  it('escapes </script even with a trailing space (HTML ends a script on </script + ws/>/EOF)', () => {
+    const out = inlineWidgetLibraries(
+      '<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>',
+      new Map([['chart.js', 'a="</script >";']]),
+    );
+    expect(out).not.toContain('"</script >"'); // the with-space closer is broken …
+    expect(out).toContain('<\\/script >'); // … into the escaped prefix form
+  });
+
   it('leaves an unknown library untouched (falls back to CDN + visible error)', () => {
     const code = '<script src="https://cdn.jsdelivr.net/npm/some-random-lib.js"></script>';
     expect(inlineWidgetLibraries(code, new Map())).toBe(code);
