@@ -153,13 +153,11 @@ const ProcessRow = memo(function ProcessRow({
         (isTool && block.tool && (block.tool.inputJson || block.tool.result || block.tool.isLoading || block.tool.subagentCalls?.length));
 
     // 派生展开状态（无 useEffect，避免无限循环）
-    // 规则：
-    // 1. 如果用户手动切换过，使用用户的选择
-    // 2. 否则，thinking 块在 active 时自动展开
-    // 3. tool 块默认不展开
-    const isExpanded = userToggled !== null
-        ? userToggled
-        : (isThinking && isThinkingActive);
+    // thinking 与 tool 块都默认折叠，只由用户手动点击展开。
+    // thinking 块刻意不再随 streaming 自动展开、完成后自动收起——那个"展开→收起"
+    // 会在流式时让页面上下跳动，体验差。折叠态仍通过 "思考中… (Xs)" 标签 + active
+    // 指示实时反馈思考进行中（见 isThinkingActive / mainLabel），不影响可感知性。
+    const isExpanded = userToggled ?? false;
 
     // Handle user click
     const handleToggle = () => {
