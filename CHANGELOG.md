@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **HTML 预览窗口定位异常**（[#290](https://github.com/hAcKlyc/MyAgents/issues/290)）：点击文件名预览 HTML 时，内嵌浏览器有时以 0 宽度创建、悬浮覆盖在聊天区域上方而非显示在右侧浏览器面板。根因是右侧分栏容器在聊天区 300ms 宽度过渡动画期间宽度仍为 0，创建时读到的尺寸是 0。现已改为等容器完成布局后再创建 webview，并在前后端两侧都拦截退化尺寸。
+
 ---
 
 ## [0.2.26] - 2026-05-31
