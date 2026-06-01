@@ -1713,6 +1713,20 @@ export class CodexRuntime implements AgentRuntime {
     codexProc.currentTurnId = turnResult.turn.id;
   }
 
+  /**
+   * Interrupt the current turn WITHOUT closing stdin (process stays alive). The app-server
+   * emits `turn/completed` (non-failed status) → unified `turn_complete` → the session goes
+   * idle, so the queued message can run next. Used by force-send. No-op if no turn is active.
+   */
+  async interruptTurn(process: RuntimeProcess): Promise<void> {
+    const codexProc = process as CodexProcess;
+    if (codexProc.exited || !codexProc.currentTurnId) return;
+    await codexProc.rpc.call('turn/interrupt', {
+      threadId: codexProc.threadId,
+      turnId: codexProc.currentTurnId,
+    }, 3_000).catch(() => { /* turn may already be ending; the turn/completed event drives idle */ });
+  }
+
   async respondPermission(
     process: RuntimeProcess,
     requestId: string,

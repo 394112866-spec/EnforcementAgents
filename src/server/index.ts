@@ -583,6 +583,9 @@ import {
   shouldUseExternalRuntime,
   sendExternalMessage,
   enqueueExternalSendForDesktop,
+  forceExecuteExternalQueueItem,
+  cancelExternalQueueItem,
+  getExternalQueueStatus,
   respondExternalPermission,
   respondExternalAskUserQuestion,
   hasPendingExternalAskUserQuestion,
@@ -2229,7 +2232,12 @@ async function main() {
             permissionMode,
             model: model ?? undefined,
           };
-          void enqueueExternalSendForDesktop(text, images, permissionMode, model ?? undefined, sendCtx)
+          // Synchronous decide: a mid-turn send is QUEUED (returns a queueId now); an idle send
+          // dispatches fire-and-forget (no queueId → becomes a bubble). Hand the queueId back so
+          // the renderer reconciles its optimistic pill, then fire-and-forget the dispatch for
+          // error surfacing (the dispatch may block up to 5min on a long turn — must not await).
+          const sent = enqueueExternalSendForDesktop(text, images, permissionMode, model ?? undefined, sendCtx);
+          sent.dispatch
             .then((result) => {
               if (!result.queued && result.error) {
                 console.error(`[chat] external send failed: ${result.error}`);
@@ -2241,7 +2249,7 @@ async function main() {
               console.error(`[chat] external send threw: ${msg}`);
               broadcast('chat:agent-error', { message: msg });
             });
-          return jsonResponse({ success: true, queued: true });
+          return jsonResponse({ success: true, queued: true, queueId: sent.queueId });
         }
 
         // ─── Builtin Runtime (existing path) ───
@@ -2491,7 +2499,9 @@ async function main() {
         if (!queueId) {
           return jsonResponse({ success: false, error: 'queueId is required' }, 400);
         }
-        const cancelledText = cancelQueueItem(queueId);
+        const cancelledText = shouldUseExternalRuntime()
+          ? cancelExternalQueueItem(queueId)
+          : cancelQueueItem(queueId);
         if (cancelledText === null) {
           return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
         }
@@ -2506,7 +2516,9 @@ async function main() {
           return jsonResponse({ success: false, error: 'queueId is required' }, 400);
         }
         try {
-          const result = await forceExecuteQueueItem(queueId);
+          const result = shouldUseExternalRuntime()
+            ? await forceExecuteExternalQueueItem(queueId)
+            : await forceExecuteQueueItem(queueId);
           if (!result) {
             return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
           }
@@ -2521,7 +2533,7 @@ async function main() {
 
       // Get queue status
       if (pathname === '/chat/queue/status' && request.method === 'GET') {
-        return jsonResponse({ success: true, queue: getQueueStatus() });
+        return jsonResponse({ success: true, queue: shouldUseExternalRuntime() ? getExternalQueueStatus() : getQueueStatus() });
       }
 
       // Poll background task output file for live stats

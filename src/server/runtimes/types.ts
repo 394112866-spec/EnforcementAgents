@@ -219,6 +219,16 @@ export interface AgentRuntime {
   stopSession(process: RuntimeProcess): Promise<void>;
 
   /**
+   * Interrupt the CURRENT turn WITHOUT killing the process — the runtime emits its normal
+   * turn-end event (e.g. Codex `turn/completed`) so the session goes idle and the next queued
+   * message can run. Used by force-send ("立即发送") of a queued message. Optional: runtimes
+   * whose protocol can't interrupt a turn without ending the session omit it (the caller then
+   * falls back to draining once the turn ends on its own). Distinct from stopSession (which
+   * closes stdin / tears down the process).
+   */
+  interruptTurn?(process: RuntimeProcess): Promise<void>;
+
+  /**
    * Switch the session's active model in-place without restarting the process.
    * Optional — only runtimes whose protocol exposes mid-session model switching
    * implement this (currently Gemini via ACP `session/set_model`). When absent

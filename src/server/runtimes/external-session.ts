@@ -19,6 +19,7 @@ import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/a
 import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
+import { shouldQueueExternalSend, canDrainExternalQueue } from './external-queue-policy';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
@@ -157,6 +158,42 @@ let earlyBroadcastedUserMsg: SessionMessage | null = null;
 // existing direct sendExternalMessage await semantics (they're already
 // serialized at the caller level by single-flight cron/heartbeat loops).
 let externalDesktopSendTail: Promise<unknown> = Promise.resolve();
+// ─── External mid-turn message queue (turn-level injection model; mirrors the builtin SDK) ───
+// Codex/CC/Gemini are turn-level: each send starts a NEW turn (no mid-tool-call injection like
+// the builtin SDK's queued_command). A desktop message typed WHILE a turn is running is HELD
+// here (a pill via queue:added) instead of sent; at turn end it's surfaced (queue:started) +
+// sent. Force-send interrupts the current turn so the same turn-end drain runs it now. See
+// external-queue-policy.ts for the (pure) defer/drain decisions.
+interface ExternalQueueItem {
+  queueId: string;
+  text: string;
+  images?: ImagePayload[];
+  permissionMode?: string;
+  model?: string;
+  context: ExternalSendContext;
+}
+const externalMessageQueue: ExternalQueueItem[] = [];
+let externalQueueSeq = 0;
+// Parity with the builtin queue cap (agent-session.ts). Guards against an unbounded queue.
+const EXTERNAL_MAX_QUEUE_SIZE = 50;
+// Monotonic suffix for surfaced user-message ids so two messages minted in the same
+// millisecond (enqueue idle path vs turn-end drain) don't collide → frontend de-dup drop.
+let externalUserMsgSeq = 0;
+
+/**
+ * Clear all queued desktop messages and broadcast queue:cancelled per item (so the renderer
+ * removes the pills). MUST be called wherever the session is torn down or switched — a stale
+ * queued item would otherwise (a) orphan its pill forever and (b) be drained into the NEW
+ * session at its next turn end, injecting old text + old context (cross-session contamination).
+ * Mirrors the builtin drainQueueWithCancellation (agent-session.ts).
+ */
+function clearExternalQueueWithCancellation(): void {
+  if (externalMessageQueue.length === 0) return;
+  for (const item of externalMessageQueue) {
+    broadcast('queue:cancelled', { queueId: item.queueId });
+  }
+  externalMessageQueue.length = 0;
+}
 // Deferred runtimeSessionId: set when session_init fires before metadata exists (pre-warm).
 // Consumed by registerSessionMetadataIfNew to patch runtimeSessionId onto newly created metadata.
 // Includes forSessionId to prevent cross-session contamination if session switches between set and consume.
@@ -204,6 +241,9 @@ function resetModuleState(): void {
   isPrewarmingSession = false;
   earlyBroadcastedUserMsg = null;
   deferredRuntimeSessionId = null;
+  // Issue #289-followup — a queued desktop message MUST NOT survive a session switch/reset:
+  // it would otherwise drain into the new session with the old session's text + context.
+  clearExternalQueueWithCancellation();
 }
 
 /**
@@ -1493,20 +1533,125 @@ export function enqueueExternalSendForDesktop(
   permissionMode: string | undefined,
   model: string | undefined,
   context: ExternalSendContext,
-): Promise<{ queued: boolean; error?: string }> {
+): { queued: boolean; queueId?: string; dispatch: Promise<{ queued: boolean; error?: string }> } {
+  // Mid-turn defer: external runtimes are turn-level (a send = a new turn), so while a turn
+  // is running (or items are already queued) HOLD this as a queue pill instead of surfacing
+  // an out-of-order bubble + starting a 2nd turn. The turn-end drain surfaces + sends it.
+  // Return the queueId SYNCHRONOUSLY so /chat/send can hand it back to the renderer, which
+  // reconciles its optimistic `opt-` pill with this real queueId (exactly like the builtin
+  // path) — without it the optimistic pill would orphan + a stray bubble would appear.
+  if (shouldQueueExternalSend(externalSessionState, externalMessageQueue.length)) {
+    if (externalMessageQueue.length >= EXTERNAL_MAX_QUEUE_SIZE) {
+      return { queued: false, dispatch: Promise.resolve({ queued: false, error: '排队消息已达上限，请稍后再发' }) };
+    }
+    const queueId = `xq-${Date.now()}-${externalQueueSeq++}`;
+    externalMessageQueue.push({ queueId, text, images, permissionMode, model, context });
+    broadcast('queue:added', { queueId, messageText: text.slice(0, 100), isInFlight: false });
+    return { queued: true, queueId, dispatch: Promise.resolve({ queued: true }) };
+  }
+
+  // Idle path: surface + send immediately (unchanged behavior). No queueId — this becomes a
+  // bubble, not a pill (the renderer only created an optimistic pill while streaming).
   const userMsg: SessionMessage = {
-    id: `user-${Date.now()}`,
+    id: `user-${Date.now()}-${externalUserMsgSeq++}`,
     role: 'user',
     content: text,
     timestamp: new Date().toISOString(),
   };
   broadcast('chat:message-replay', { message: userMsg });
 
-  const task = externalDesktopSendTail.then(() =>
+  const dispatch = externalDesktopSendTail.then(() =>
     sendExternalMessage(text, images, permissionMode, model, context, userMsg)
   );
+  externalDesktopSendTail = dispatch.catch(() => undefined);
+  return { queued: true, dispatch };
+}
+
+/**
+ * Turn-end drain (one item) — surface the next queued message as a bubble (queue:started) and
+ * send it (a fresh turn). Guarded by canDrainExternalQueue so it only fires when idle with a
+ * pending item. Called via setTimeout(0) right after the turn-end idle so it never races
+ * chat:message-complete on the SSE wire (see persistTurnResult idle-ordering notes).
+ */
+function drainExternalQueueAfterTurn(): void {
+  if (!canDrainExternalQueue(externalSessionState, externalMessageQueue.length)) return;
+  const item = externalMessageQueue.shift();
+  if (!item) return;
+  // Reserve the turn synchronously: the drained item is GUARANTEED to start a turn, but the
+  // chained sendExternalMessage only flips state to 'running' after awaiting metadata/save.
+  // Without this, a send arriving in that window sees state='idle' + queueLength=0 and would
+  // surface an out-of-order bubble (the exact UX this fixes). Flip now so it re-queues instead.
+  setExternalSessionState('running');
+  const userMsg: SessionMessage = {
+    id: `user-${Date.now()}-${externalUserMsgSeq++}`,
+    role: 'user',
+    content: item.text,
+    timestamp: new Date().toISOString(),
+  };
+  // Surface the bubble now (turn end) — mirrors the builtin queue:started fallback.
+  broadcast('queue:started', {
+    queueId: item.queueId,
+    userMessage: { id: userMsg.id, role: 'user', content: item.text, timestamp: userMsg.timestamp },
+  });
+  // Send (serialized), adopting the surfaced bubble so sendExternalMessage doesn't re-broadcast.
+  const task = externalDesktopSendTail.then(() =>
+    sendExternalMessage(item.text, item.images, item.permissionMode, item.model, item.context, userMsg)
+  );
   externalDesktopSendTail = task.catch(() => undefined);
-  return task;
+  // Surface a drained-send failure the same way /chat/send does for the initial dispatch —
+  // otherwise the pill has already become a bubble but the error is silently swallowed.
+  void task
+    .then((result) => {
+      if (result && !result.queued && result.error) {
+        broadcast('chat:agent-error', { message: result.error });
+      }
+    })
+    .catch((err) => broadcast('chat:agent-error', { message: err instanceof Error ? err.message : String(err) }));
+}
+
+/**
+ * Force-execute a queued external item ("立即发送"): move it to the FRONT, then run it ASAP.
+ * Three cases:
+ *   - running + runtime CAN interrupt a turn (Codex `interruptTurn`): interrupt now → the
+ *     resulting turn/completed → turn_complete → persistTurnResult → idle → drain runs it
+ *     immediately (true force). Process stays alive.
+ *   - running + runtime CANNOT interrupt mid-turn (Claude Code `-p`; Gemini until its
+ *     session/cancel→turn-end flow is verified): DEGRADE to move-to-front — the item is now
+ *     first, so the NATURAL turn-end drain runs it next (not truly "immediate", but it does
+ *     run, ahead of everything else). drainExternalQueueAfterTurn() is a no-op here (state is
+ *     'running'); the turn-end hook handles it.
+ *   - idle (no turn in flight): drain directly now.
+ * Mirrors the builtin forceExecuteQueueItem (move-to-front + interrupt; turn-end drain surfaces).
+ */
+export async function forceExecuteExternalQueueItem(queueId: string): Promise<boolean> {
+  const idx = externalMessageQueue.findIndex(q => q.queueId === queueId);
+  if (idx < 0) return false;
+  if (idx > 0) {
+    const [item] = externalMessageQueue.splice(idx, 1);
+    externalMessageQueue.unshift(item);
+  }
+  if (externalSessionState === 'running' && activeProcess && activeRuntime?.interruptTurn) {
+    await activeRuntime.interruptTurn(activeProcess);
+  } else {
+    // Idle → drain now. Running-without-interrupt → no-op; the moved-to-front item runs at the
+    // next turn-end drain.
+    drainExternalQueueAfterTurn();
+  }
+  return true;
+}
+
+/** Cancel a queued external item (the pill ✕). Returns the removed text, or null if not found. */
+export function cancelExternalQueueItem(queueId: string): string | null {
+  const idx = externalMessageQueue.findIndex(q => q.queueId === queueId);
+  if (idx < 0) return null;
+  const [item] = externalMessageQueue.splice(idx, 1);
+  broadcast('queue:cancelled', { queueId });
+  return item.text;
+}
+
+/** Current external queue (for /chat/queue/status). Mirrors builtin getQueueStatus shape. */
+export function getExternalQueueStatus(): Array<{ id: string; messagePreview: string }> {
+  return externalMessageQueue.map(q => ({ id: q.queueId, messagePreview: q.text.slice(0, 100) }));
 }
 
 /**
@@ -1686,6 +1831,10 @@ export async function stopExternalSession(): Promise<boolean> {
     // PRD 0.2.18 — clear inbox meta on hard stop (user clicked stop / runtime
     // killed mid-turn). Push session_aborted reply so caller doesn't hang.
     clearInboxMetaOnRejection('session_aborted', 'external runtime session was stopped before turn completed');
+    // Drop queued desktop messages on a hard stop (user clicked Stop) — otherwise the pills
+    // orphan and, with state now 'idle' + queueLength>0, the next send queues behind stale
+    // items that nothing will ever drain (no turn is running) → the session wedges.
+    clearExternalQueueWithCancellation();
     setExternalSessionState('idle');
   }
 }
@@ -2021,6 +2170,10 @@ async function persistTurnResult(): Promise<void> {
       imRequestRegistry.unregister(activeRequestId);
     }
     activeRequestId = null;
+    // Mid-turn queue drain: a turn just ended (completed OR interrupted via force) → surface +
+    // send the next queued desktop message. Deferred to the next macrotask so queue:started
+    // never races chat:message-complete / chat:status idle on the SSE wire.
+    setTimeout(() => drainExternalQueueAfterTurn(), 0);
   }
 }
 
@@ -2560,6 +2713,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // chat:message-complete (see persistInFlight comment above).
       if (!persistInFlight) {
         setExternalSessionState('idle');
+        // Drain queued desktop messages on a failed turn too, so pills don't stick (the next
+        // item resumes a fresh process via sendExternalMessage Case 2 if needed).
+        setTimeout(() => drainExternalQueueAfterTurn(), 0);
       }
       // Clean up module state — prevents stuck sessions on CC crash
       isRunning = false;
