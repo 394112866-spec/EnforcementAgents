@@ -3058,7 +3058,8 @@ const pendingPermissions = new Map<string, {
 }>();
 
 // AskUserQuestion types - import from shared
-import type { AskUserQuestionInput } from '../shared/types/askUserQuestion';
+import type { AskUserQuestionInput, AskUserQuestion } from '../shared/types/askUserQuestion';
+import { withQuestionTextAnswerKeys } from '../shared/types/askUserQuestion';
 export type { AskUserQuestionInput, AskUserQuestion, AskUserQuestionOption } from '../shared/types/askUserQuestion';
 
 // PlanMode types - import from shared
@@ -8426,11 +8427,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               interrupt: true,
             };
           }
-          // Return with answers filled in
+          // Return with answers filled in. SDK 0.3.158's AskUserQuestion tool
+          // looks each answer up by question TEXT (see withQuestionTextAnswerKeys);
+          // our renderer keys by index, so we must alias them here or the model is
+          // told "The user did not answer the questions." (0.2.119→0.3.158 regression).
           const inputWithAnswers = input as Record<string, unknown>;
+          const askQuestions = (inputWithAnswers as { questions?: AskUserQuestion[] }).questions;
           return {
             behavior: 'allow' as const,
-            updatedInput: { ...inputWithAnswers, answers }
+            updatedInput: { ...inputWithAnswers, answers: withQuestionTextAnswerKeys(askQuestions, answers) }
           };
         }
 

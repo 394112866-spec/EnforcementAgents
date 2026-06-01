@@ -15,7 +15,8 @@ import type { ToolAttachment } from '../../shared/types/tool-attachment';
 import { StaleRuntimeSessionError } from './types';
 import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightSave } from './tool-attachments';
 import { maybeSpill, type LargeValueRef } from '../utils/large-value-store';
-import type { AskUserQuestionInput } from '../../shared/types/askUserQuestion';
+import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/askUserQuestion';
+import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import type { RuntimeType } from '../../shared/types/runtime';
@@ -1582,7 +1583,12 @@ export async function respondExternalAskUserQuestion(
       );
     } else {
       console.log(`[external-session] AskUserQuestion answered for requestId=${requestId}`);
-      const updatedInput = { ...pending.input, answers };
+      // CC is the same SDK 0.3.158 binary as builtin: it looks answers up by
+      // question TEXT, so alias the renderer's index-keyed answers (see
+      // withQuestionTextAnswerKeys). The superset keeps the original id/index
+      // keys intact, so Codex's own response builder (codex.ts) is unaffected.
+      const askQuestions = (pending.input as { questions?: AskUserQuestion[] }).questions;
+      const updatedInput = { ...pending.input, answers: withQuestionTextAnswerKeys(askQuestions, answers) };
       await activeRuntime.respondPermission(activeProcess, requestId, 'allow_once', undefined, undefined, updatedInput);
     }
     // Delete only after successful delivery — if respondPermission throws
