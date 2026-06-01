@@ -1189,10 +1189,15 @@ async fn create_bot_instance<R: Runtime>(
                 .join(".myagents")
                 .join("openclaw-plugins")
                 .join(plugin_id);
+            let bridge_state_dir = match &agent_id {
+                Some(aid) => health::agent_channel_data_dir(aid, &bot_id).join("openclaw-state"),
+                None => health::bot_data_dir(&bot_id).join("openclaw-state"),
+            };
 
             let bp = bridge::spawn_plugin_bridge(
                 app_handle,
                 &plugin_dir.to_string_lossy(),
+                &bridge_state_dir,
                 bridge_port,
                 rust_port,
                 &bot_id,
