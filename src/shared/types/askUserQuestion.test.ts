@@ -62,4 +62,19 @@ describe('withQuestionTextAnswerKeys', () => {
     const out = withQuestionTextAnswerKeys(questions, { 'Q1?': 'A' });
     expect(out).toEqual({ 'Q1?': 'A' });
   });
+
+  // Characterization: two questions with IDENTICAL text collapse to one text key (first-wins,
+  // via `if (text in merged) return`). This is inherent to the SDK contract — the binary builds
+  // its result with `answers[question.text]`, so same-text questions are indistinguishable to the
+  // SDK by construction and BOTH resolve to the first answer. We deliberately do NOT fight that
+  // with index fallbacks (the SDK never reads them for the builtin tool). Pin the behavior so a
+  // future refactor doesn't silently change it.
+  it('collapses duplicate-text questions to the first answer (matches SDK text-keying)', () => {
+    const questions = [q('Same?'), q('Same?')];
+    const out = withQuestionTextAnswerKeys(questions, { '0': 'first', '1': 'second' });
+    expect(out['Same?']).toBe('first'); // first-wins; SDK reads this for BOTH questions
+    // Index keys are still preserved verbatim for any id/index consumer (e.g. Codex).
+    expect(out['0']).toBe('first');
+    expect(out['1']).toBe('second');
+  });
 });

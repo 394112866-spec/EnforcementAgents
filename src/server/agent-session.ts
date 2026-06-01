@@ -7762,6 +7762,10 @@ export async function forkSession(assistantMessageId: string): Promise<{
           // Persist threw AFTER the SDK fork file was created — clean up the orphan SDK
           // transcript so we don't leak it, then let the outer catch surface the failure.
           try { await sdkDeleteSession(eager.newSid, { dir: currentAgentDir }); } catch { /* best-effort */ }
+          // Restore the parent's persist cursor/cache on this exit too, so EVERY path out of the
+          // eager block leaves the invariant uniform — defensive against a future SessionStore
+          // writer that touches these module globals (harmless today, asymmetric otherwise).
+          restoreParentPersistState();
           throw persistErr;
         }
         restoreParentPersistState();

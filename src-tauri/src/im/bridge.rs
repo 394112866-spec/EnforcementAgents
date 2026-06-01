@@ -1147,9 +1147,15 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         // as Weixin include local tokens from this state when asking the
         // platform for a QR code; falling back to ~/.openclaw makes separate
         // workspaces look like the same OpenClaw instance.
+        //
+        // Var names verified against upstream OpenClaw consumers (do not pattern-match):
+        //   OPENCLAW_STATE_DIR  → src/utils.ts resolveConfigDir (highest-priority override; drives isolation)
+        //   OPENCLAW_CONFIG_PATH → src/utils.ts (explicit config-file pointer; expects a *.json file path)
+        //   OPENCLAW_OAUTH_DIR  → src/config/paths.ts
+        // (Dropped CLAWDBOT_STATE_DIR — removed upstream in 6b9915a106, now 0 consumers; and the bare
+        //  OPENCLAW_CONFIG, which was never read — the consumed name is OPENCLAW_CONFIG_PATH.)
         .env("OPENCLAW_STATE_DIR", path_env_value(&state_env.state_dir))
-        .env("CLAWDBOT_STATE_DIR", path_env_value(&state_env.state_dir))
-        .env("OPENCLAW_CONFIG", path_env_value(&state_env.config_path))
+        .env("OPENCLAW_CONFIG_PATH", path_env_value(&state_env.config_path))
         .env("OPENCLAW_OAUTH_DIR", path_env_value(&state_env.oauth_dir));
 
     // Working directory: prefer the plugin_dir (so Node's ESM resolver

@@ -75,7 +75,7 @@ Rust spawn_plugin_bridge()
    └─ 不通过 → 自动重新安装 shim
 3. spawn(node, script, --plugin-dir, --port, --rust-port, --bot-id)
    └─ 敏感配置通过 BRIDGE_PLUGIN_CONFIG 环境变量传递（不暴露到 ps）
-   └─ 注入 per-channel OpenClaw 状态目录（OPENCLAW_STATE_DIR / CLAWDBOT_STATE_DIR / OPENCLAW_CONFIG / OPENCLAW_OAUTH_DIR）
+   └─ 注入 per-channel OpenClaw 状态目录（OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH / OPENCLAW_OAUTH_DIR；名字以上游 utils.ts/paths.ts 实际消费者为准）
    └─ 注入 proxy_config 环境变量
 4. stdout/stderr → 统一日志（过滤 heartbeat 噪音）
 5. Health check: GET /health × 30 次, 500ms 间隔, 最多 15s
