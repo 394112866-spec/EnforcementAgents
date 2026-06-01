@@ -1288,8 +1288,10 @@ async function _doStartExternalSession(options: {
     resetWatchdog();
     currentTurnStartTime = Date.now();
 
-    // Persist user message immediately (crash safety — don't wait for turn_complete)
-    try { await saveSessionMessages(options.sessionId, allSessionMessages); }
+    // Persist user message immediately (crash safety — don't wait for turn_complete).
+    // Append-only: allSessionMessages only grows here, so forbid the shrink-rewrite
+    // (a shorter array would mean a partial load — never delete the on-disk tail).
+    try { await saveSessionMessages(options.sessionId, allSessionMessages, { allowShrink: false }); }
     catch (err) { console.error('[external-session] Failed to persist user message:', err); }
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
@@ -1616,9 +1618,9 @@ export async function sendExternalMessage(
     // have to register here when the first actual message arrives via Case 3.
     await registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
 
-    // Persist user message immediately (crash safety)
+    // Persist user message immediately (crash safety). Append-only → forbid shrink.
     if (lastSessionId) {
-      try { await saveSessionMessages(lastSessionId, allSessionMessages); }
+      try { await saveSessionMessages(lastSessionId, allSessionMessages, { allowShrink: false }); }
       catch (err) { console.error('[external-session] Failed to persist user message:', err); }
     }
 
@@ -2216,10 +2218,12 @@ async function persistTurnResult(): Promise<void> {
       resetTurnAccumulators();
     }
 
-    // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
+    // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append).
+    // Append-only at turn end → forbid the shrink-rewrite (guards against a partial
+    // in-memory array ever deleting the on-disk tail).
     if (allSessionMessages.length > 0 && lastSessionId) {
       try {
-        await saveSessionMessages(lastSessionId, allSessionMessages);
+        await saveSessionMessages(lastSessionId, allSessionMessages, { allowShrink: false });
         const { found: foundRealUserMessage, preview: lastMessagePreview } =
           resolveLastRealUserMessagePreview(allSessionMessages);
         await updateSessionMetadata(lastSessionId, {

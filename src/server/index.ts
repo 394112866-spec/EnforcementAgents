@@ -545,7 +545,7 @@ import {
 import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
-import { resolveLastRealUserMessagePreview, shrinkSessionMessageForClient, shrinkSessionMessagesForClient } from './utils/session-message-preview';
+import { resolveLastRealUserMessagePreview, shrinkSessionMessageForClient, shrinkSessionMessagesForClient, shrinkReplayContentForClient } from './utils/session-message-preview';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics, withLogContext, setStdioBrokenProbe } from './logger';
@@ -2152,11 +2152,17 @@ async function main() {
         const streamingId = getStreamingAssistantId();
         allMessages.forEach((message) => {
           if (streamingId && message.id === streamingId) return; // skip streaming message
-          // Strip Playwright tool results from replay to avoid sending large base64 data to frontend
-          const stripped = typeof message.content !== 'string'
-            ? { ...message, content: stripPlaywrightResults(message.content) }
-            : message;
-          client.send('chat:message-replay', { message: stripped });
+          // Strip Playwright tool results, then cap each replayed message at the
+          // 256KB inline limit (parity with the REST /sessions/:id path's
+          // shrinkSessionMessagesForClient). Without the cap a multi-MB persisted
+          // message (e.g. a Codex sub-agent fan-out turn, 757 blocks) ships as one
+          // oversized chat:message-replay SSE event, breaks the SSE→Tauri-IPC
+          // handoff, and truncates restored history at the first oversized message.
+          const strippedContent = typeof message.content !== 'string'
+            ? stripPlaywrightResults(message.content)
+            : message.content;
+          const content = shrinkReplayContentForClient(strippedContent);
+          client.send('chat:message-replay', { message: { ...message, content } });
         });
         client.send('chat:logs', { lines: getLogLines() });
         if (shouldUseExternalRuntime()) {
