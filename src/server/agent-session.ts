@@ -6078,6 +6078,10 @@ export async function initializeAgent(
         currentModel = resolved.model;
         console.log(`[agent] self-resolved model: ${resolved.model}`);
       }
+      if (resolved.permissionMode && !isExternalRuntime(getCurrentRuntimeType()) && resolved.permissionMode !== currentPermissionMode) {
+        currentPermissionMode = resolved.permissionMode as PermissionMode;
+        console.log(`[agent] self-resolved permissionMode: ${resolved.permissionMode}`);
+      }
     } catch (error) {
       // Self-resolution failure is non-fatal — fall back to external sync (Rust sync_ai_config)
       console.warn('[agent] self-resolution failed, falling back to external sync:', error);
@@ -6200,6 +6204,19 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Update agentDir from session
   if (sessionMeta.agentDir) {
     agentDir = sessionMeta.agentDir;
+  }
+
+  if (agentDir && !isExternalRuntime(getCurrentRuntimeType())) {
+    try {
+      const { resolveWorkspaceConfig } = await import('./utils/admin-config');
+      const resolved = resolveWorkspaceConfig(agentDir, sessionMeta, { includeMcp: false });
+      if (resolved.permissionMode && resolved.permissionMode !== currentPermissionMode) {
+        currentPermissionMode = resolved.permissionMode as PermissionMode;
+        console.log(`[agent] switchToSession: restored permissionMode=${resolved.permissionMode}`);
+      }
+    } catch (error) {
+      console.warn('[agent] switchToSession: permission self-resolution failed:', error);
+    }
   }
 
   // Initialize logger for the target session (lazy file creation)

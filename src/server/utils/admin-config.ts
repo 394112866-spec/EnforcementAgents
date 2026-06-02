@@ -76,6 +76,7 @@ export interface AdminAppConfig {
   disabledProviderIds?: string[];
   // Agent
   agents?: AgentConfigSlim[];
+  defaultPermissionMode?: string;
   // Allow passthrough of all other fields
   [key: string]: unknown;
 }
@@ -88,6 +89,7 @@ export interface AgentConfigSlim {
   workspacePath?: string;
   providerId?: string;
   model?: string;
+  permissionMode?: string;
   channels?: ChannelConfigSlim[];
   /** PRD 0.2.17 — plugins this Agent enables (subset of globally-visible). */
   enabledPluginIds?: string[];
@@ -115,6 +117,7 @@ export interface ProjectSlim {
   path: string;
   mcpEnabledServers?: string[];
   model?: string;
+  permissionMode?: string;
   [key: string]: unknown;
 }
 
@@ -621,6 +624,15 @@ export interface WorkspaceResolvedConfig {
   mcpServers: McpServerDefinition[];
   providerEnv: ResolvedProviderEnv | undefined;
   model: string | undefined;
+  permissionMode: string;
+}
+
+const BUILTIN_PERMISSION_MODES = new Set(['auto', 'plan', 'fullAgency', 'custom']);
+
+function asBuiltinPermissionMode(value: unknown): string | undefined {
+  return typeof value === 'string' && BUILTIN_PERMISSION_MODES.has(value)
+    ? value
+    : undefined;
 }
 
 /**
@@ -664,6 +676,9 @@ export function resolveWorkspaceConfig(
   const agents = (config.agents ?? []) as Array<Record<string, unknown>>;
   const agent = agents.find(a =>
     typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalizedDir
+  );
+  const project = loadProjects().find(p =>
+    typeof p.path === 'string' && p.path.replace(/\\/g, '/') === normalizedDir
   );
 
   // --- Resolve MCP ---
@@ -716,14 +731,25 @@ export function resolveWorkspaceConfig(
     }
   }
 
-  if (mcpServers.length > 0 || providerEnv || model) {
+  // --- Resolve Permission Mode ---
+  // Same precedence as renderer Chat/Launcher builtin mode resolution:
+  // session snapshot → Agent → Project → global default. Pre-warm uses this
+  // before the first user message, so plan/fullAgency cannot rely on a later
+  // in-place SDK mode switch.
+  const permissionMode = asBuiltinPermissionMode(sessionMeta?.permissionMode)
+    ?? asBuiltinPermissionMode(agent?.permissionMode)
+    ?? asBuiltinPermissionMode(project?.permissionMode)
+    ?? asBuiltinPermissionMode(config.defaultPermissionMode)
+    ?? 'auto';
+
+  if (mcpServers.length > 0 || providerEnv || model || permissionMode) {
     const source = sessionMeta?.configSnapshotAt ? 'session-snapshot' : 'agent';
     console.log(
       `[admin-config] resolveWorkspaceConfig (${source}): ` +
       `provider=${providerId ?? 'subscription'}, model=${model ?? 'default'}, ` +
-      `mcp=${mcpServers.length} server(s)${agent ? '' : ' (no agent match)'}`
+      `permission=${permissionMode}, mcp=${mcpServers.length} server(s)${agent ? '' : ' (no agent match)'}`
     );
   }
 
-  return { mcpServers, providerEnv, model };
+  return { mcpServers, providerEnv, model, permissionMode };
 }
