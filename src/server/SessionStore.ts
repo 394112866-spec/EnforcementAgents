@@ -587,6 +587,7 @@ export async function updateSessionMetadata(
         | 'favorite'
         | 'lastMessagePreview'
         | 'titleSource'
+        | 'titleGenAttempts'
         | 'runtime'
         | 'runtimeSessionId'
         | 'runtimeUsageTotals'

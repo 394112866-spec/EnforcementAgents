@@ -4,6 +4,7 @@ import {
   describeTerminalReason,
   isAbortedTerminalReason,
   shouldRecordTurnForTitle,
+  shouldTitleCompletedTurn,
   shouldSurfaceTerminalReason,
 } from './terminalReason';
 
@@ -137,5 +138,27 @@ describe('shouldRecordTurnForTitle — #245 round-acceptance gate', () => {
     expect(shouldRecordTurnForTitle(42)).toBe(true);
     expect(shouldRecordTurnForTitle({})).toBe(true);
     expect(shouldRecordTurnForTitle(false)).toBe(true);
+  });
+});
+
+describe('shouldTitleCompletedTurn — builtin #296 auto-title success gate', () => {
+  it('titles a clean successful turn', () => {
+    expect(shouldTitleCompletedTurn(false, 'completed')).toBe(true);
+    // external runtimes / SDK paths that omit terminal_reason are still titleable
+    expect(shouldTitleCompletedTurn(false, undefined)).toBe(true);
+    expect(shouldTitleCompletedTurn(false, '')).toBe(true);
+  });
+
+  it('does NOT title an is_error turn even if the terminal_reason looks completed (#245 family)', () => {
+    // The builtin result branch is reached by is_error results carrying visible
+    // assistant text; those must never seed a title.
+    expect(shouldTitleCompletedTurn(true, 'completed')).toBe(false);
+    expect(shouldTitleCompletedTurn(true, undefined)).toBe(false);
+  });
+
+  it('does NOT title aborted / truncated / errored terminal reasons', () => {
+    for (const reason of ['aborted_streaming', 'aborted_tools', 'max_turns', 'model_error', 'prompt_too_long']) {
+      expect(shouldTitleCompletedTurn(false, reason)).toBe(false);
+    }
   });
 });

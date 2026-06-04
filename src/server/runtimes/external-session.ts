@@ -25,6 +25,7 @@ import type { RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
+import { firePostTurnTitleHook } from '../turn-hooks';
 import { createSessionMetadata } from '../types/session';
 import { snapshotForImSession, snapshotForOwnedSession } from '../utils/session-snapshot';
 import { findAgentByWorkspacePath } from '../utils/admin-config';
@@ -2529,6 +2530,15 @@ async function persistTurnResult(): Promise<void> {
       tool_count: turnToolCount,
       duration_ms: turnDurationMs ?? 0,
     });
+
+    // #296 — backend-owned auto session titling for external runtimes. Gate on a
+    // real successful turn (`lastTurnSucceeded`), not just "persistTurnResult ran".
+    // Fired through the `turn-hooks` leaf slot (dependency inversion) — see
+    // turn-hooks.ts. Non-blocking + best-effort. External runtimes use CLI-owned
+    // auth, so no providerEnv is passed.
+    if (lastTurnSucceeded && lastSessionId) {
+      firePostTurnTitleHook(lastSessionId, runtimeType, lastModel || undefined, undefined);
+    }
   } finally {
     // PRD 0.2.18 Session Inbox — reply pushback for external runtime.
     // Use the meta/hints snapshotted at entry (NOT module-level slots, which

@@ -171,3 +171,19 @@ export function shouldRecordTurnForTitle(reason: unknown): boolean {
   if (typeof reason !== 'string' || reason.length === 0) return true;
   return reason === 'completed';
 }
+
+/**
+ * #296 — builtin post-turn auto-title success gate.
+ *
+ * The builtin SDK result handler's "broadcast message-complete" branch is also
+ * reached by `is_error:true` results that carried visible assistant text and by
+ * non-`completed` terminal reasons (aborted_streaming / max_turns). Those must
+ * NOT seed an auto title (same class as #245). The external runtime path gates on
+ * its own `lastTurnSucceeded`; this is the builtin equivalent, composing the
+ * is_error flag with {@link shouldRecordTurnForTitle}. Kept as a named pure
+ * predicate so the gate is unit-tested rather than living inline in the 10k-line
+ * result handler.
+ */
+export function shouldTitleCompletedTurn(isError: boolean, terminalReason: unknown): boolean {
+  return !isError && shouldRecordTurnForTitle(terminalReason);
+}

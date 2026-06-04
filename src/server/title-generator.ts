@@ -19,6 +19,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge, type ProviderEnv } from './agent-session';
 import { applyContextWindowSuffix } from './utils/model-capabilities';
 import { isLikelyErrorTitle } from '../shared/titleFilters';
+import { capTitleAtBoundary } from '../shared/sessionTitle';
 import { ClaudeCodeRuntime } from './runtimes/claude-code';
 import { CodexRuntime } from './runtimes/codex';
 import { GeminiRuntime } from './runtimes/gemini';
@@ -35,17 +36,46 @@ const EXTERNAL_TIMEOUT_MS = 30_000;
 /** Max chars per user/assistant message when building context */
 const PER_MESSAGE_LIMIT = 200;
 
-const SYSTEM_PROMPT = `You are a conversation title generator. Output ONLY the title — nothing else.
+const SYSTEM_PROMPT = `You are a session title generator for a chat app. Weeks later the user will
+scan a long list of past sessions — your title must let them INSTANTLY
+recognize which task this was, and tell it apart from similar ones.
+
+A good title is a RETRIEVAL CUE, not a summary. Optimize for: seeing only this
+title in a list, would the user think "oh, that's the time I did X"?
+
+MUST keep — preserve the most distinctive anchor from the conversation,
+verbatim, whenever one exists:
+  - proper noun / project / product name  (高考, 知乎2077, MyAgents, 望京北路)
+  - issue / PR / version number           (#215, #223, 0.2.22)
+  - specific file, API, library, error code (教宗通谕.docx, SSE, Cron, 402)
+These exact strings are what make the session findable — keeping them matters
+MORE than avoiding repetition or sounding clean.
+
+A common effective shape is [domain/project] + [specific sub-task/artifact] +
+[action], e.g. 高考题号展示调整. This is GUIDANCE, not a template — use whatever
+phrasing is most recognizable for this particular conversation.
 
 Rules:
-- Maximum 30 characters (CJK counts as 1)
-- Language MUST match the user's language (Chinese → Chinese title, English → English)
-- Identify the MAIN TOPIC or GOAL across all rounds, not just the first message
-- Use specific nouns/verbs — e.g. "Redis 缓存优化" not "技术讨论"
-- NEVER copy a sentence or phrase directly from the conversation
-- NEVER use generic words: help, question, discussion, issue, request, 帮助, 问题, 讨论, 请求
-- NEVER output meta-text about the title itself (e.g. "对话标题应该是…", "The title should be…")
-- Just output the title directly, like: SSE 流式调试`;
+  - Identify the real task across ALL rounds, not just round 1 — openers are
+    often vague (回忆一下…, yo, 速度快不快).
+  - Match the dominant language of the user's messages.
+  - Short by default — a few words. Hard limit 30 characters (CJK counts as 1).
+    If it doesn't fit, drop the least distinctive words, never the anchor.
+  - NEVER use a full sentence, the user's whole request, or the assistant's
+    reply/greeting as the title.
+  - NEVER use generic fillers (帮助/问题/讨论/请求 · help/question/discussion)
+    or meta-text about the title itself (对话标题应该是…, The title should be…).
+  - If there is no real task yet (pure greeting / one-liner / test), output a
+    short neutral label such as 新对话 — do NOT invent a topic.
+
+Output ONLY the title. No quotes, no surrounding punctuation, no explanation.
+
+Examples:
+  tweak how exam question numbers render on a page   → 高考题号展示调整
+  transcribe a recorded .m4a conversation            → 望京北路音频转写
+  investigate issue #215 about Ctrl+F search nav     → #215 搜索导航 Bug 调研
+  merge and release the 0.2.22 branch                → 0.2.22 合并发布
+  conversation is just 你好 / 测试                     → 新对话`;
 
 export interface TitleRound {
   user: string;
@@ -58,7 +88,9 @@ function buildUserPrompt(rounds: TitleRound[]): string {
     const assistant = r.assistant.slice(0, PER_MESSAGE_LIMIT);
     return `[Round ${i + 1}]\nUser: ${user}\nAssistant: ${assistant}`;
   });
-  return `<conversation>\n${parts.join('\n\n')}\n</conversation>\n\nFollow the System Instruction to generate a short title for the conversation above.`;
+  // Restate the hard constraints at the very END (recency): weaker / smaller
+  // title-gen models follow the last instruction most reliably.
+  return `<conversation>\n${parts.join('\n\n')}\n</conversation>\n\nWrite the session title. Keep the most distinctive anchor (name / number / file), match the user's language, ≤30 chars, output only the title.`;
 }
 
 /**
@@ -86,10 +118,10 @@ function cleanTitle(raw: string): string {
   // shouldRecordTurnForTitle; this catches paths it can't cover (loaded-history
   // reconstruction, title-gen call hitting its own 4xx).
   if (isLikelyErrorTitle(cleaned)) return '';
-  if (cleaned.length > TITLE_MAX_LENGTH) {
-    cleaned = cleaned.slice(0, TITLE_MAX_LENGTH);
-  }
-  return cleaned;
+  // Boundary-aware cap: a blind slice(0,30) severs Latin words ("…SSE 流式调" →
+  // "…SSE 流"); capTitleAtBoundary backs a mid-word cut off to the last space.
+  // Pure CJK (no whitespace) still hard-cuts at the limit.
+  return capTitleAtBoundary(cleaned, TITLE_MAX_LENGTH);
 }
 
 /**
@@ -348,6 +380,14 @@ export async function generateTitleExternal(
 
   const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), EXTERNAL_TIMEOUT_MS));
   const titleText = await Promise.race([resultPromise, timeoutPromise]);
+
+  // #296 review (Codex C2): mark the attempt finished now. If the TIMEOUT won the
+  // race, `settle()` was never called so `resolved` is still false — and the
+  // late-handle guard in `startPromise.then` (`if (resolved) stopSession`) would
+  // then NOT stop a child whose cold-start resolves AFTER the 5s grace below,
+  // leaking the title-gen CLI process. Setting it true here makes that late `.then`
+  // always stop the process, and also makes any late stream event a no-op.
+  resolved = true;
 
   // Cleanup path — three cases:
   //   1. handle already set → stopSession directly.

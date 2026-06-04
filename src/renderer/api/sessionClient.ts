@@ -206,33 +206,12 @@ export async function getSessionStats(sessionId: string): Promise<SessionDetaile
     }
 }
 
-export interface TitleRound {
-    user: string;
-    assistant: string;
-}
-
-/**
- * Generate a short AI-powered session title from multiple QA rounds.
- * Triggered after 3+ rounds to ensure enough context for an accurate title.
- * MUST use tab-scoped API (postJson) since session metadata lives on the Tab Sidecar.
- * Using global apiPostJson would send the request to the Global Sidecar which returns 404.
- */
-export async function generateSessionTitle(
-    postJson: <T>(path: string, body?: unknown) => Promise<T>,
-    sessionId: string,
-    rounds: TitleRound[],
-    model: string,
-    providerEnv?: { baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' },
-): Promise<{ success: boolean; title?: string }> {
-    try {
-        return await postJson<{ success: boolean; title?: string }>(
-            '/api/generate-session-title',
-            { sessionId, rounds, model, providerEnv },
-        );
-    } catch {
-        return { success: false };
-    }
-}
+// Auto session-title generation moved fully to the backend Title Service (#296):
+// the sidecar triggers it after a successful turn and pushes the result via the
+// `chat:session-title-changed` SSE event. The former `generateSessionTitle`
+// client helper + its frontend trigger in TabProvider were retired. The
+// `/api/generate-session-title` endpoint still exists for a future manual
+// "regenerate title" action.
 
 // ============= Global Stats =============
 

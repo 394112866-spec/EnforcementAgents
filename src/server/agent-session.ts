@@ -52,6 +52,7 @@ import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
+import { firePostTurnTitleHook } from './turn-hooks';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
 import {
   createMaterializedSessionMetadata,
@@ -71,7 +72,7 @@ import { setAmbientLogContext, clearAmbientLogContextField } from './logger-cont
 import { beginTurn as beginTurnAbort, endTurn as endTurnAbort, abortTurn as abortTurnAbort } from './utils/turn-abort';
 import type { CancelReason } from './utils/cancellation';
 import { localTimestamp } from '../shared/logTime';
-import { isAbortedTerminalReason } from '../shared/terminalReason';
+import { isAbortedTerminalReason, shouldTitleCompletedTurn } from '../shared/terminalReason';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
@@ -4969,6 +4970,14 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
   setToolResult(toolUseId, content, isError);
 }
 
+// #296 — the most recent turn-end persist promise (assigned inside
+// handleMessageComplete). The post-turn auto-title hook chains off this so it
+// reads a transcript + stats.messageCount that already include the just-completed
+// turn (the Title Service reads from disk). Turns are serial per session, so this
+// is always the current turn's persist at the fire site. Initialized resolved so a
+// fire before any turn is a harmless no-op.
+let lastTurnEndPersist: Promise<unknown> = Promise.resolve();
+
 function handleMessageComplete(): void {
   isStreamingMessage = false;
   // Capture before fallback potentially re-arms it, so the post-teardown
@@ -5136,7 +5145,9 @@ function handleMessageComplete(): void {
   // Fire-and-forget: persistMessagesToStorage is async (cooperative file lock),
   // but the enclosing handler is a sync stream-event callback. Errors are already
   // swallowed inside SessionStore writers; surfacing them here would be no-op.
-  void persistMessagesToStorage({
+  // #296: capture the promise into `lastTurnEndPersist` so the post-turn auto-title
+  // hook can fire AFTER this turn is durable on disk (still fire-and-forget here).
+  lastTurnEndPersist = persistMessagesToStorage({
     inputTokens: currentTurnUsage.inputTokens,
     outputTokens: currentTurnUsage.outputTokens,
     cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
@@ -10488,6 +10499,31 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           });
 
           handleMessageComplete();
+
+          // #296 — backend-owned auto session titling, fired through the
+          // `turn-hooks` leaf slot (dependency inversion) so this file never
+          // imports the Title Service / title-generator (no import cycle). Three
+          // correctness requirements, all handled here:
+          //  1. Gate on a genuinely successful turn — mirror the external path's
+          //     `lastTurnSucceeded` and the retired renderer's #245 gate. This
+          //     `else` branch is also reached by is_error results with visible
+          //     text and by non-completed terminal reasons (aborted_streaming /
+          //     max_turns); those must never seed a title.
+          //  2. Fire AFTER the turn-end persist resolves so the Title Service
+          //     reads a transcript + stats.messageCount that already include THIS
+          //     turn — matches external ordering and ensures a session ending at
+          //     exactly the round threshold still gets titled (not one turn late,
+          //     not never-titled if the tab is then closed).
+          //  3. Snapshot raw model + providerEnv now (module globals a mid-session
+          //     /model/set could mutate before the persist resolves).
+          // Still best-effort + non-blocking (void .then, errors swallowed downstream).
+          if (shouldTitleCompletedTurn(resultMessage.is_error === true, resultMessage.terminal_reason)) {
+            const titleSid = sessionId;
+            const titleModel = currentModel;
+            const titleProviderEnv = currentProviderEnv;
+            void lastTurnEndPersist.then(() =>
+              firePostTurnTitleHook(titleSid, 'builtin', titleModel, titleProviderEnv));
+          }
 
           // PRD 0.2.18 Session Inbox — turn-end reply pushback.
           // If this turn was triggered by an inbox message with replyBack=true,
