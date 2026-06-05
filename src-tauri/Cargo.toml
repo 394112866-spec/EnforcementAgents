@@ -1,11 +1,11 @@
 [package]
-name = "myagents"
-version = "0.2.14"
-description = "MyAgents - Desktop Claude Code for everyone"
-authors = ["MyAgents Team <myagents.io@gmail.com>"]
+name = "enforcement-agents"
+version = "0.1.0"
+description = "执行工作台 - 执行律师专属 AI 桌面工作台"
+authors = ["394112866-spec"]
 license = "Apache-2.0"
-repository = "https://github.com/hAcKlyc/MyAgents"
-homepage = "https://myagents.io"
+repository = "https://github.com/394112866-spec/MyAgents"
+homepage = "https://github.com/394112866-spec/MyAgents"
 edition = "2021"
 # MSRV note: 1.81 documents `std::fs::rename` as atomic replace-on-existing
 # across all platforms (Windows uses MoveFileExW(REPLACE_EXISTING) under the

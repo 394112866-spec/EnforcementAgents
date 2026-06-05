@@ -1,8 +1,8 @@
 {
-  "name": "myagents",
-  "description": "MyAgents - Desktop Claude Code for everyone. AI-powered productivity, not just for developers.",
+  "name": "enforcement-agents",
+  "description": "执行工作台 - 执行律师专属 AI 桌面工作台",
   "type": "module",
-  "version": "0.2.14",
+  "version": "0.1.0",
   "license": "Apache-2.0",
   "packageManager": "npm@10.8.2",
   "engines": {

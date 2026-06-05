@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "MyAgents",
-  "version": "0.2.14",
-  "identifier": "com.myagents.app",
+  "productName": "执行工作台",
+  "version": "0.1.0",
+  "identifier": "com.enforcement.agents",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MyAgents",
+        "title": "执行工作台",
         "label": "main",
         "width": 1200,
         "height": 800,
