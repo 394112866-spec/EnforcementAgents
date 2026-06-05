@@ -1,0 +1,179 @@
+/**
+ * CustomSelect - Custom dropdown select component
+ * Replaces native <select> with styled dropdown matching design system.
+ * Positioning is delegated to the shared `<Popover>` primitive, which
+ * portals to <body> and auto-flips when there isn't room below.
+ */
+
+import { Check, ChevronDown } from 'lucide-react';
+import { type ReactNode, useCallback, useRef, useState } from 'react';
+
+import { Popover } from '@/components/ui/Popover';
+
+export interface SelectOption {
+    value: string;
+    label: string;
+    icon?: ReactNode;
+    /** Right-aligned suffix content (e.g., status badge) */
+    suffix?: ReactNode;
+    /** Renders as a non-selectable section header/divider */
+    isSeparator?: boolean;
+}
+
+interface CustomSelectProps {
+    value: string;
+    options: SelectOption[];
+    onChange: (value: string) => void;
+    placeholder?: string;
+    triggerIcon?: ReactNode;
+    className?: string;
+    /**
+     * Trigger size — controls the closed-state padding + font size:
+     *   'compact' (default when `compact={true}`): 11px / px-2 py-1
+     *   'sm'      (default): 12px / px-3 py-2 — fine-print fields, dense forms
+     *   'md':                14px / px-3 py-2.5 — primary fields the user
+     *                        focuses on (e.g. workspace picker in dispatch
+     *                        dialog where the active workspace is the most
+     *                        important context to read at a glance).
+     * `compact` prop kept for back-compat; `size` is the modern API.
+     */
+    size?: 'sm' | 'md';
+    compact?: boolean;
+    footerAction?: {
+        label: string;
+        icon?: ReactNode;
+        onClick: () => void;
+    };
+}
+
+export default function CustomSelect({
+    value,
+    options,
+    onChange,
+    placeholder = '请选择',
+    triggerIcon,
+    className,
+    size = 'sm',
+    compact,
+    footerAction,
+}: CustomSelectProps) {
+    const [isOpen, setIsOpen] = useState(false);
+    const triggerRef = useRef<HTMLButtonElement>(null);
+
+    const selectedOption = options.find(o => o.value === value);
+
+    const handleSelect = useCallback((optionValue: string) => {
+        onChange(optionValue);
+        setIsOpen(false);
+    }, [onChange]);
+
+    return (
+        <div className={`relative ${className ?? ''}`}>
+            <button
+                ref={triggerRef}
+                type="button"
+                onClick={() => setIsOpen(!isOpen)}
+                className={`flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] text-left transition-colors hover:border-[var(--ink-subtle)] ${
+                    compact
+                        ? 'px-2 py-1 text-[11px]'
+                        : size === 'md'
+                            ? 'px-3 py-2.5 text-sm'
+                            : 'px-3 py-2 text-xs'
+                }`}
+            >
+                {triggerIcon && (
+                    <span className="shrink-0 text-[var(--ink-muted)]">{triggerIcon}</span>
+                )}
+                {/* Mirror the selected option's `icon` (when present) into the
+                    closed trigger so users see the same visual marker as the
+                    dropdown row they picked. Falls back gracefully when the
+                    option set has no icons. */}
+                {!triggerIcon && selectedOption?.icon && (
+                    <span className="shrink-0">{selectedOption.icon}</span>
+                )}
+                <span className={`min-w-0 flex-1 truncate ${selectedOption ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}`}>
+                    {selectedOption?.label ?? placeholder}
+                </span>
+                <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+            </button>
+            <Popover
+                open={isOpen}
+                onClose={() => setIsOpen(false)}
+                anchorRef={triggerRef}
+                placement="bottom-start"
+                matchAnchorWidth
+                className="shadow-md"
+                // Elevated above modal backdrops since selects are often
+                // rendered inside OverlayBackdrop-wrapped dialogs.
+                zIndex={300}
+            >
+                {/* Scroll container — Popover's DEFAULT_CHROME ships
+                    `overflow-hidden` (for rounded-corner clipping of the
+                    shadow). Putting `overflow-auto` on the same element
+                    via className gets overridden by that `overflow-hidden`
+                    in Tailwind's compiled order, which silently clipped
+                    long option lists (e.g. 24-hour picker showed only
+                    ~8 items, couldn't scroll). A nested div sidesteps the
+                    conflict: outer clips, inner scrolls. */}
+                <div className="max-h-60 overflow-y-auto py-1">
+                    {options.map(option =>
+                        option.isSeparator ? (
+                            <div key={option.value} className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]/50">
+                                {option.label}
+                            </div>
+                        ) : (
+                            <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => handleSelect(option.value)}
+                                // Item font size mirrors the trigger's: `size='md'`
+                                // → `text-sm` (14px) so options read at parity with
+                                // what the closed trigger shows. Default `size='sm'`
+                                // keeps the legacy `text-xs` (12px) for dense forms.
+                                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+                                    size === 'md' ? 'text-sm' : 'text-xs'
+                                } ${
+                                    option.value === value
+                                        ? 'text-[var(--accent-warm)]'
+                                        : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+                                }`}
+                            >
+                                {option.icon && (
+                                    <span className="shrink-0">{option.icon}</span>
+                                )}
+                                <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                                {option.suffix && (
+                                    <span className="shrink-0">{option.suffix}</span>
+                                )}
+                                {option.value === value && (
+                                    <Check className="h-3 w-3 shrink-0" />
+                                )}
+                            </button>
+                        )
+                    )}
+
+                    {footerAction && (
+                        <>
+                            <div className="my-1 border-t border-[var(--line)]" />
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setIsOpen(false);
+                                    footerAction.onClick();
+                                }}
+                                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] ${
+                                    size === 'md' ? 'text-sm' : 'text-xs'
+                                }`}
+                            >
+                                {footerAction.icon && (
+                                    <span className="shrink-0">{footerAction.icon}</span>
+                                )}
+                                <span>{footerAction.label}</span>
+                            </button>
+                        </>
+                    )}
+                </div>
+            </Popover>
+        </div>
+    );
+}

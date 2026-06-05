@@ -1,0 +1,351 @@
+# MyAgents CLI 架构
+
+## 概述
+
+MyAgents 内置了一个自配置 CLI 工具（`myagents`），让 AI 和用户都能通过命令行管理应用配置。CLI 是一个轻量 TypeScript 脚本，解析命令行参数后转发为 HTTP 请求到 Sidecar 的 Admin API，所有业务逻辑都在 Sidecar 侧。
+
+## 设计动机
+
+GUI 能做的配置操作（MCP 管理、Provider 配置、Agent Channel 管理、定时任务等），AI 也应该能做。传统方式是让 AI 输出操作步骤让用户去 GUI 点击，但这违背了 Agent 产品的自主性原则。CLI 让 AI 通过 Bash 工具**直接执行**管理操作，能力与 GUI 对等（部分命令如 `agent show` / `runtime describe` 甚至只在 CLI 存在，服务于 AI 的发现链路）。
+
+## 架构图
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 场景 1：AI 内部调用（主要用途）                                       │
+│                                                                     │
+│ 用户: "帮我配个 MCP"                                                 │
+│   → AI Bash 工具 → `myagents mcp add --id xxx ...`                  │
+│   → PATH 查找 ~/.myagents/bin/myagents                              │
+│   → Node 执行 myagents.ts                                            │
+│   → fetch(127.0.0.1:${MYAGENTS_PORT}/api/admin/mcp/add)             │
+│   → Admin API 写 config → SSE 广播 → 前端同步                        │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ 场景 2：用户终端调用（次要用途）                                       │
+│                                                                     │
+│ 终端: `MyAgents mcp list` 或 `myagents mcp list`                    │
+│   → cli.rs:is_cli_mode() 检测 CLI 参数                               │
+│   → 不启动 GUI / 不杀 sidecar / 不触发单实例焦点                      │
+│   → 找到 bundled Node +  ~/.myagents/bin/myagents                      │
+│   → 读 ~/.myagents/sidecar.port 找到 Global Sidecar 端口             │
+│   → 注入 MYAGENTS_PORT → 转发到 Admin API                            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## 组件分层
+
+| 层 | 文件 | 职责 |
+|----|------|------|
+| **Rust CLI 入口** | `src-tauri/src/cli.rs` | 检测 CLI 模式、查找 Node.js 和脚本、发现端口、spawn 子进程 |
+| **CLI 脚本** | `src/cli/myagents.ts` | 参数解析、命令路由、HTTP 调用、输出格式化（含 `recoveryHint` 渲染） |
+| **CLI 同步** | `src-tauri/src/commands.rs` (`cmd_sync_cli`) | 版本门控拷贝脚本到用户目录 |
+| **Admin API** | `src/server/admin-api.ts` | 业务逻辑：验证 → 写 config → 更新内存状态 → SSE 广播；含跨 runtime 发现 handler |
+| **PATH 注入** | `src/server/agent-session.ts` (`buildClaudeSessionEnv`) | 将 `~/.myagents/bin` 加入 SDK 子进程 PATH |
+
+## 文件布局
+
+```
+源码侧（开发）                              用户侧（运行时）
+─────────────────                          ─────────────────
+src/cli/                                   ~/.myagents/
+├── myagents.ts   ──── cmd_sync_cli ────►  ├── bin/
+└── myagents.cmd                           │   ├── myagents       (chmod 755, 去掉 .ts 后缀)
+                                           │   └── myagents.cmd   (Windows)
+src-tauri/src/                             ├── npm-global/        (AI 自装 CLI 落点,
+├── cli.rs        (CLI 模式入口)            │   └── bin/             agent-session 注入 npm_config_prefix)
+└── commands.rs   (cmd_sync_cli)           ├── .cli-version      ("9" — 版本门控)
+                                           └── sidecar.port       (Global Sidecar 端口)
+```
+
+## CLI 脚本设计
+
+### 执行方式
+
+```bash
+#!/usr/bin/env bun    ← myagents.ts 第一行 shebang
+```
+
+CLI 脚本有两种执行方式：
+1. **AI Bash 工具调用**：SDK 子进程的 PATH 包含 `~/.myagents/bin`，直接 `myagents mcp list`，shebang 找到 PATH 中的 bun 执行
+2. **Rust CLI 入口调用**：`cli.rs` 显式调用 `bun ~/.myagents/bin/myagents <args>`
+
+### 端口发现
+
+```
+优先级：--port 标志 > MYAGENTS_PORT 环境变量
+```
+
+- **AI 调用场景**：`buildClaudeSessionEnv()` 注入 `MYAGENTS_PORT` 环境变量（当前 Session Sidecar 端口）
+- **终端调用场景**：`cli.rs` 从 `~/.myagents/sidecar.port` 文件读取 Global Sidecar 端口，注入 `MYAGENTS_PORT`
+
+### 命令体系
+
+```
+myagents <group> <action> [args] [flags]
+
+Groups:
+  mcp       管理 MCP 工具服务器（list/add/remove/enable/disable/env/test/oauth）
+  model     管理模型供应商（list/add/remove/set-key/set-default/verify）
+  agent     管理 Agent 与 Channel（list/show/enable/disable/set/channel/runtime-status）
+  runtime   查看 Agent Runtime 装机情况与每个 runtime 的 model/permissionMode 清单
+  skill     管理 Skills（list/info/add/remove/enable/disable/sync）
+  cron      管理定时任务（list/add/start/stop/remove/update/runs/status）
+  task      管理任务中心任务（list/get/create-direct/create-from-alignment/run/rerun/...）
+  thought   管理任务中心想法（list/create）
+  im        IM runtime actions（send-media）
+  widget    Generative UI widget 说明（readme）
+  plugin    管理 OpenClaw 社区插件（list/install/remove）
+  config    读写应用配置（get/set）
+  status    查看应用运行状态
+  version   查看版本
+  reload    热重载配置
+
+Global flags:
+  --help          帮助（顶层静态；子命令走 /api/admin/help 动态渲染）
+  --json          JSON 输出
+  --dry-run       预览不执行（支持写操作）
+  --port NUM      覆盖端口
+  --disable-nonessential  禁用非必要校验
+```
+
+### 请求-响应模式
+
+```typescript
+// CLI 脚本的所有调用都是同一个模式
+const result = await fetch(`http://127.0.0.1:${PORT}/api/admin/${group}/${action}`, {
+  method: 'POST',
+  body: JSON.stringify(body),
+});
+```
+
+Admin API 的响应格式统一：
+```jsonc
+// 成功
+{ "success": true, "data": { ... }, "hint": "optional free-form success tip" }
+// 失败
+{
+  "success": false,
+  "error": "error description",
+  "recoveryHint": {                                 // 结构化恢复建议
+    "recoveryCommand": "myagents runtime list",     //   下一步可运行的命令
+    "message": "See valid runtimes + install status."
+  }
+}
+// dry-run
+{ "success": true, "dryRun": true, "preview": { ... } }
+```
+
+**`recoveryHint` 设计**：CLI 在人类可读模式下渲染为 `→ Run: <command>   <message>` 追加在错误行下方，JSON 模式保留完整字段。目的是让 AI 调用者在验证失败时能一步恢复 —— "想知道哪些 runtime 可用？按提示跑 `myagents runtime list`" —— 不需要读源码或反复试错。
+
+### 发现型命令（Discovery）
+
+AI 在调用写操作前通常需要先「问清楚选项」。以下三条命令是纯查询，不改状态：
+
+```bash
+myagents runtime list                             # 看哪些 runtime 装了、未装的给出安装提示
+myagents runtime describe <runtime>               # 看某 runtime 的 model + permissionMode 枚举
+myagents agent show <agent-id>                    # 看某 Agent 的 effective 默认（按 runtime 正确解析）
+```
+
+这三条命令的存在让 `task create-direct --runtime X --model Y --permissionMode Z` 的值空间对 AI 完全自解释 —— `--help` 里只列 flag，值通过 `runtime describe` 查，避免 `--help` 文案与实际可用值漂移。
+
+## 版本门控同步机制
+
+### 问题
+
+CLI 脚本不能直接放在 app bundle 里使用，因为：
+1. SDK 子进程的 PATH 不包含 app bundle 内部路径（各平台结构不同，且包含不应暴露给 AI 的二进制文件）
+2. macOS app bundle 内资源文件没有可执行权限（shebang 执行需要 +x）
+3. 文件名需从 `myagents.ts` → `myagents`（去掉 .ts 后缀，shebang 才能直接跑）
+
+### 方案
+
+```
+app 启动 → ConfigProvider → invoke('cmd_sync_cli')
+  → 读 ~/.myagents/.cli-version
+  → 内容 == CLI_VERSION 常量 → 跳过（return Ok(false)）
+  → 不等 → 拷贝 Resources/cli/myagents.ts → ~/.myagents/bin/myagents
+        → chmod 755（Unix）
+        → 拷贝 myagents.cmd（Windows）
+        → 写 .cli-version = CLI_VERSION
+```
+
+**开发约束**：修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` 后，MUST bump `CLI_VERSION`（`src-tauri/src/commands.rs`），否则用户端 CLI 不会更新。
+
+### 与 ADMIN_AGENT_VERSION 的关系
+
+| 门控 | 控制内容 | 文件 | 版本文件 |
+|------|---------|------|---------|
+| `CLI_VERSION` | CLI 脚本 (`myagents.ts`, `myagents.cmd`) | `~/.myagents/.cli-version` | `src-tauri/src/commands.rs` |
+| `ADMIN_AGENT_VERSION` | 小助理 CLAUDE.md + Skills | `~/.myagents/.admin-agent-version` | `src-tauri/src/commands.rs` |
+| `SYSTEM_SKILLS_VERSION` | 系统级 skills（task-alignment / task-implement） | `~/.myagents/.system-skills-version` | `src-tauri/src/commands.rs` |
+
+三个版本门控**独立运作**，修改各自内容只需 bump 对应版本即可。
+
+## Rust CLI 入口（场景 2）
+
+`cli.rs` 让用户可以在终端直接运行 CLI 命令，无需启动 GUI：
+
+```bash
+# macOS — 直接调用 app 二进制
+/Applications/MyAgents.app/Contents/MacOS/MyAgents mcp list
+
+# 或者创建 alias
+alias myagents='/Applications/MyAgents.app/Contents/MacOS/MyAgents'
+myagents status
+```
+
+### 检测逻辑
+
+```rust
+// src-tauri/src/cli.rs
+const CLI_COMMANDS: &[&str] = &[
+    "mcp", "model", "agent", "runtime", "config", "status", "reload", "version",
+    "cron", "plugin", "skill", "task", "thought", "im", "widget",
+];
+
+pub fn is_cli_mode(args: &[String]) -> bool {
+    args.iter().any(|a| CLI_COMMANDS.contains(&a.as_str()) || a == "--help" || a == "-h")
+}
+```
+
+**开发约束**：在 `src/cli/myagents.ts` 中新增 `myagents <group>` 顶层命令时，MUST 把 `<group>` 加入 `CLI_COMMANDS`，否则 `MyAgents <group> ...` 会进入 GUI 模式（无反馈）。
+
+应用 `main()` 在 Tauri 初始化前检查 CLI 模式，提前分流：
+- **CLI 模式**：不启动 GUI、不杀 sidecar、不触发单实例窗口焦点
+- **GUI 模式**：正常启动 Tauri 桌面应用
+
+### Windows 特殊处理
+
+```rust
+#[cfg(windows)]
+{
+    // windows_subsystem = "windows" 隐藏了控制台
+    // CLI 模式需要重新附着到父控制台才能看到 stdout/stderr
+    AttachConsole(ATTACH_PARENT_PROCESS);
+}
+```
+
+### 端口发现
+
+```rust
+fn discover_sidecar_port() -> Option<String> {
+    // 读取 ~/.myagents/sidecar.port（Global Sidecar 启动时写入）
+    // 校验是合法端口号（防止陈旧/损坏文件）
+}
+```
+
+**前提**：MyAgents GUI 必须已经运行（Global Sidecar 存活），CLI 才能连接。如果 app 未运行，CLI 脚本会报 `ECONNREFUSED` 并提示用户。
+
+## Admin API
+
+Admin API 注册在 Sidecar 的 `/api/admin/*` 路由下，提供与 GUI 对等的管理能力：
+
+| 路由前缀 | 能力 |
+|---------|------|
+| `/api/admin/mcp/*` | MCP 服务器 CRUD、启用/禁用、环境变量管理、连通性测试、OAuth 流程 |
+| `/api/admin/model/*` | Provider CRUD、API Key 设置、模型验证、默认供应商切换 |
+| `/api/admin/agent/*` | Agent 启用/禁用/属性设置/**show**、Channel CRUD、runtime 状态查询 |
+| `/api/admin/runtime/*` | 跨 runtime 发现：`list` / `describe` |
+| `/api/admin/cron/*` | 定时任务 CRUD、启停、执行历史、状态查询 |
+| `/api/admin/task/*` | 任务中心：list/get/create-direct/create-from-alignment/run/rerun/update-status/append-session/archive/delete/read-doc/write-doc |
+| `/api/admin/thought/*` | 任务中心想法：list/create |
+| `/api/admin/skill/*` | Skills CRUD、URL 安装、启停、sync |
+| `/api/admin/plugin/*` | OpenClaw 插件安装/卸载/列表 |
+| `/api/admin/im/*` | IM runtime actions（send-media） |
+| `/api/admin/widget/*` | Generative UI widget 资料 |
+| `/api/admin/config/*` | 通用配置读写 |
+| `/api/admin/status` | 应用运行状态 |
+| `/api/admin/version` | 版本号 |
+| `/api/admin/reload` | 热重载配置 |
+| `/api/admin/help` | 命令帮助文本（子命令 help 来自这里） |
+
+### 写入模式
+
+所有写操作遵循相同模式：
+
+```
+CLI → Admin API → atomicModifyConfig() → 写 config.json（磁盘优先）
+                → 更新 Sidecar 内存状态（setMcpServers 等）
+                → broadcast() SSE 事件 → 前端 React 状态同步
+```
+
+这确保了 CLI 修改和 GUI 修改产生完全相同的效果。
+
+### 管理 API 转发（`/api/task/*` / `/api/cron/*` 等）
+
+部分能力（Task / CronTask / Plugin）在 Rust Management API 而非 Node.js。Admin handler 作为薄转发层，并通过 `wrapMgmtResponse()` / `mgmtError()` 保证：
+- 成功响应剥掉 Rust `ok` 字段、包成 Admin `{ success: true, data }`
+- 失败响应原样透传 `recoveryHint`（例如 Management API 不可达时 Admin handler 注入 `→ Run: myagents status` 指引）
+
+## Task 创建链路（关键机制）
+
+`task create-direct` / `task create-from-alignment` 是任务中心的重点命令，链路比其他命令长一层 —— 在转发给 Rust 前有一次 **pre-flight 验证**：
+
+```
+CLI → /api/admin/task/create-direct → validateTaskOverrides(payload)
+                                            │
+        ┌───────────────────────────────────┴────────────────────┐
+        │                                                         │
+        ▼                                                         ▼
+   合法 → 转发 Rust → Task 落盘                           非法 → 立即 AdminResponse
+                 │                                               + recoveryHint
+                 ▼                                               （指向 `runtime list`
+         enrichTaskCreateResponse                                  或 `runtime describe`）
+         （读持久化 Task，echo
+         真实的 overridden 字段，
+         并附带 nextSteps）
+```
+
+**为什么 pre-flight 放在 Node 而不是 Rust**：Node.js 有现成的 `RuntimeFactory.detect()` / `queryModels()` 接口，而且 Node.js 能给出带 `recoveryCommand` 的结构化错误；Rust 侧只能返回 opaque serde 错误。
+
+**验证三要素**：
+1. `--runtime` — 必须是 `VALID_RUNTIMES` 之一，且外部 runtime 必须本机已装（`detect()` 带 2s timeout）
+2. `--permissionMode` — 按 effective runtime 的 `getRuntimePermissionModes()` 枚举校验（builtin/外部统一走此路径）
+3. `--model` — 外部 runtime 走 `queryRuntimeModels()`；builtin 不做本地校验（model 由 Provider 决定）
+
+**effective runtime 解析**：`--runtime` 显式传 → 用之；否则从 `workspacePath` / `workspaceId` 查 Agent 默认；都查不到就拒绝（避免静默 trust）。
+
+**单一真相源**：`VALID_RUNTIMES` 常量在 `src/shared/types/runtime.ts` 定义，`HELP_TEXTS` 模板字符串、validator、factory 全部从此读取；并用一个 type-level assertion (`_exhaustiveRuntimeCheck`) 在 `typecheck` 阶段拦截 `RuntimeType` 联合与 `VALID_RUNTIMES` 元组的漂移。
+
+## PATH 注入
+
+`buildClaudeSessionEnv()` 构造 SDK 子进程的 PATH，决定 AI Bash 工具能找到哪些命令：
+
+```
+PATH 优先级（agent-session.ts::buildClaudeSessionEnv）：
+  systemNodeDirs              → 用户安装的 Node.js（npm 更可靠）
+  ~/.myagents/npm-global/bin  → AI 自装 CLI 落点（npm_config_prefix 也指这里）
+  bundledNodeDir              → 内置 Node.js（fallback）
+  ~/.myagents/bin             → MyAgents 自己的 CLI（myagents）+ 升级残留
+  系统 PATH                    → 用户其他工具
+```
+
+`~/.myagents/bin` 当前只放 `myagents` CLI。早期版本曾在这里写 `agent-browser` 等 wrapper —— 升级用户磁盘上可能仍残留这些文件，但被 `~/.myagents/npm-global/bin` 在 PATH 上抢先匹配，自然失效，无需主动清理。
+
+`~/.myagents/npm-global/` 是 SDK 子进程的 npm prefix（由 agent-session 注入 `npm_config_prefix`）：AI 跑 `npm install -g <pkg>` 一定落在这里，配合 PATH 注入实现"装完即可用"。
+
+## 安全设计
+
+| 层面 | 措施 |
+|------|------|
+| **本地绑定** | Admin API 只在 `127.0.0.1` 上监听，无外部访问 |
+| **端口隔离** | 每个 Sidecar 有独立端口，CLI 连接到对应 Session 的 Sidecar |
+| **无持久化凭据** | CLI 脚本不存储任何 API Key，配置读写全走 Sidecar |
+| **权限控制** | 脚本权限 755（owner rwx），`~/.myagents/` 目录权限遵循用户 HOME 策略 |
+| **文件大小上限** | `--taskMdFile` / `--taskMdContent` 硬上限 1 MB（防 binary 误传、runaway content） |
+| **发现 detect timeout** | `runtime list` / `describe` 给每个 runtime 的 `detect()` 包 2s race，防挂起 CLI 阻塞其它 runtime |
+
+## 排查指南
+
+| 问题 | 排查方法 |
+|------|---------|
+| `ECONNREFUSED` | MyAgents GUI 未运行，先启动应用 |
+| `MYAGENTS_PORT not set` | 在 AI Bash 环境外直接运行了脚本（缺少环境变量注入） |
+| CLI 脚本不存在 | 应用未初始化过（`cmd_sync_cli` 未执行），启动一次 GUI |
+| CLI 版本过旧 | `~/.myagents/.cli-version` 与 `commands.rs` 的 `CLI_VERSION` 不匹配，重启应用触发同步 |
+| 终端 `myagents` 找不到 | 场景 2 需要用完整路径或创建 alias，`~/.myagents/bin` 默认不在 shell PATH |
+| `Management API not available` | Node.js Sidecar 起来了但 Rust Management API 没起 — CLI 会附带 `→ Run: myagents status` 指引 |
+| `MyAgents task list` 进了 GUI | 新命令组忘了加进 `CLI_COMMANDS`（`src-tauri/src/cli.rs`） |
