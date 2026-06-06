@@ -397,19 +397,34 @@ export default memo(function BrandSection({
 
     return (
         <section ref={sectionRef} className="flex flex-1 flex-col items-center px-12">
-            {/* Upper area: Brand Name + Slogans as ONE visual group.
-                `mb-2` tightens the title↔slogan gap so they read as a
-                paired brand block rather than two free-floating lines;
-                the larger breathing room below that group (on the
-                ModeSegment wrapper) separates "who we are" from "what
-                you're about to do". */}
+            {/* Upper area: Brand Name + Slogans as ONE visual group. */}
             <div className="flex flex-1 flex-col items-center justify-center">
                 <h1 className="brand-title mb-2 text-[2.5rem] text-[var(--ink)] md:text-[3.5rem]">
-                    MyAgents
+                    执行工作台
                 </h1>
                 <p className="brand-slogan text-center text-[15px] text-[var(--ink-muted)] md:text-[17px]">
-                    每个人都应享受智能的推背感，欢迎来到言出法随的世界
+                    执行律师的 AI 搭档——从收案到回款，每一步都有人帮你
                 </p>
+
+                {/* Enforcement feature chips */}
+                <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                    {[
+                        { label: '材料整理', icon: '📂' },
+                        { label: '案件分析', icon: '📋' },
+                        { label: '财产调查', icon: '🔍' },
+                        { label: '流水分析', icon: '💳' },
+                        { label: '查档指引', icon: '📍' },
+                        { label: '案件评估', icon: '📊' },
+                    ].map(f => (
+                        <span
+                            key={f.label}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-[13px] text-[var(--ink-secondary)]"
+                        >
+                            <span>{f.icon}</span>
+                            <span>{f.label}</span>
+                        </span>
+                    ))}
+                </div>
             </div>
 
             {/* Mode declaration: 任务 / 想法 (see DESIGN.md §6.8, PRD §4.1).
