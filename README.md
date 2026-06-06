@@ -1,153 +1,131 @@
 <div align="center">
 
-# MyAgents
+# 执行工作台 Enforcement Agents
 
-**活在你的电脑里，真正能干活的个人 Agent**
-
-[中文](#中文) | [English](#english)
+**执行律师专属 AI 桌面工作台**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13.0+-black.svg)](https://www.apple.com/macos/)
 [![Windows](https://img.shields.io/badge/Windows-10+-blue.svg)](https://www.microsoft.com/windows/)
-[![Website](https://img.shields.io/badge/Website-myagents.io-green.svg)](https://myagents.io)
 
-**官网**: [https://myagents.io](https://myagents.io)
-
-![MyAgents Screenshot](index.png)
+基于 [MyAgents](https://github.com/hAcKklyc/MyAgents) (Apache-2.0)
 
 </div>
 
 ---
 
-<a name="中文"></a>
+## 这是什么
 
-## 中文
+**执行工作台**是执行律师的 AI 桌面应用。把案件材料扔进来，AI 帮你整理、分析、调查、评估，输出能直接拿去执行的结果——查档指引、财产报告、申请书、评估建议。
 
-MyAgents 是一款开源桌面端 AI Agent，同时具备「Claude Code」的强大 Agent 能力和灵活的 IM Bot 交互——二合一，一键安装零门槛。
+不是通用 AI 工具，是从**收案到回款**每个环节都知道该做什么的执行搭档。
 
-截止 2026 年 1 月，AI 的智能飞速提升，已经让软件开发者首先变成了十倍百倍生产力的人。而 2026 年注定是智能丰裕的元年，我们希望这股 AI 的力量能被更多的人所掌握，无论你是学生、内容创作者、教育工作者、各种行业专家、产品经理等任何一个「想要去做些什么的人」。我们希望「MyAgents」能为你的电脑注入灵魂，让他成为你的思维放大器，将你的品味、想法变成现实对世界产生更大的影响。
+## 内置执行能力
 
-### 快速体验
-- 直接访问 https://myagents.io 点击下载安装包
-- Mac 版本支持 Apple Silicon 和 Intel 芯片
-- Win 版本支持 Windows 10 及以上
+### 6 个执行专用 Skills
 
-### 核心能力
+| Skill | 做什么 | 输入 → 输出 |
+|-------|--------|-------------|
+| `file-sorter` | 材料智能整理 | 杂乱文件 → 规范目录 + 文件映射表 |
+| `case-analysis` | 案件分析底稿 | 材料目录 → 案件基本信息 + 时间线 + 财产线索 + 缺口清单 |
+| `execution-survey` | 被执行人财产调查 | 企业名称 → 企查查全维度扫描 + 财产调查报告 + 关联图谱 |
+| `archive-inquiry` | 查档指引生成 | 注册地址 → 哪里查/带什么/几点开门的出发指南 |
+| `wechat-flow-analysis` | 微信/银行流水分析 | 流水 Excel → 异常交易识别 + 限消违规检测 + 财产线索 |
+| `case-evaluation` | 案件综合评估 | 三个上游报告 → 回款概率 + 工作量 + 收费建议 |
 
-- **图形界面零门槛** - Chrome 风格多标签页，每个 Tab 独立运行一个 Agent，真正的并行工作流
-- **多 Agent Runtime（实验室）** - 除内置 Claude Agent SDK 外，可选 **Claude Code CLI** 或 **OpenAI Codex CLI** 作为外部 Runtime，按场景挑顺手的引擎
-- **多模型自由切换** - Anthropic、DeepSeek、Moonshot、智谱、MiniMax、火山方舟、ZenMux、硅基流动、OpenRouter 等 10+ 供应商，按需选择，成本可控
-- **Skills 技能系统** - 把常用流程沉淀成 Agent 可复用的能力模块，内置 + 自定义双轨
-- **MCP 工具集成** - 内置 MCP 协议支持（STDIO/HTTP/SSE），连接外部工具和数据源，Agent 能力可无限扩展
-- **自定义 Agent** - 配置独立的 Prompt、工具、模型，打造专属 Agent
-- **Agent + Channel 架构** - 内置 Telegram / 钉钉适配器，更多 IM 平台（飞书 / 微信 / QQ 等）通过 OpenClaw 插件接入；支持多 Bot 管理、交互式权限审批、多媒体消息
-- **定时任务系统** - 固定间隔 / Cron 表达式 / 一次性三种调度，Chat 内、AI 工具调用、IM Bot 全场景可用
-- **内嵌终端** - 分屏右侧交互式 PTY（xterm.js + portable-pty），自动定位到工作区目录，与 Tab 共享生命周期
-- **内嵌浏览器** - Tauri 多 Webview 子视图，AI 生成的链接和 HTML 文件一键预览，独立 Cookie 持久化
-- **全文搜索** - 基于 Tantivy + jieba 的本地搜索引擎，Session 历史与工作区文件秒级检索，纯本地不上传
-- **自配置 CLI 与 MA 小助理** - 内置 `myagents` 命令让 AI 和用户都能通过 Bash 直接管理应用配置；MA 小助理是产品首席客服，能直接帮你诊断问题、配置工具
-- **智能权限管理** - 行动 / 规划 / 自主三种模式，安全可控
-- **本地数据，持续进化** - 所有对话、文件、记忆都存在本地，隐私有保障，API 直连供应商。随着使用积累，你的 AI 会越来越懂你
-- **完全开源免费** - Apache-2.0 协议，代码完全公开
+### 内置执行 Agent
 
-### 支持的模型供应商
+打开应用即是执行律师模式。AI 懂执行程序、知道关键期限、会算冻结到期、能识别隐匿财产手段。
 
-| 供应商 | 模型 | 类型 |
-|--------|------|------|
-| Anthropic | Claude Sonnet 4.6, Opus 4.6, Haiku 4.5 | 订阅/API |
-| DeepSeek | DeepSeek Chat, Reasoner | API |
-| Moonshot | Kimi K2.5, K2 Thinking, K2 | API |
-| 智谱 AI | GLM 5, 4.7, 4.5 Air | API |
-| MiniMax | M2.5, M2.5 Lightning, M2.1, M2.1 Lightning | API |
-| 火山方舟 Coding Plan | Doubao Seed 2.0 Code, GLM 4.7, DeepSeek V3.2, Kimi K2.5 | API |
-| 火山方舟 API调用 | Doubao Seed 2.0 Pro, Code Preview, Lite | API |
-| ZenMux | ZenMux Auto, Gemini 3.1 Pro, Claude 4.6, Doubao Seed 2.0 等 | API |
-| 硅基流动 | Kimi K2.5, GLM 4.7, DeepSeek V3.2, Step 3.5 Flash 等 | API |
-| OpenRouter | GPT-5.2 Codex, GPT-5.2 Pro, Gemini 3 等多模型 | API |
+### 预配 MCP 工具
 
-### 系统要求
+- **企查查 MCP** — 工商信息、司法风险、知识产权、关联企业穿透
+- **小红书 MCP** — 搜索各地查档窗口信息、律师实地经验
+- **Playwright MCP** — 浏览器自动化，下载法院文书、查询公开信息
 
-#### 最终用户
+## 快速体验
 
-- **macOS 13.0 (Ventura)** 或更高版本，支持 Apple Silicon 和 Intel 芯片
-- **Windows 10** 或更高版本
+从 [Releases](https://github.com/394112866-spec/EnforcementAgents/releases) 下载安装包。
 
-#### 开发者
+- **Windows**: 下载 `EnforcementAgents_Setup.exe`，双击安装
+- **macOS**: 下载 `EnforcementAgents.dmg`，拖入 Applications
 
-- macOS 13.0+ / Windows 10+ / Linux（Ubuntu 20.04+ AppImage/deb）
-- [Node.js](https://nodejs.org) (v20+) - 开发时需要；生产构建内置 Node.js v24，最终用户无需安装
-- [Rust](https://rustup.rs)
+安装后打开"执行工作台"即可使用。无需安装任何开发工具。
 
-### 快速开始（开发者）
+## 支持的模型
 
-#### 安装
+内置 10+ 模型供应商，按需选择：
 
-```bash
-git clone https://github.com/hAcKlyc/MyAgents.git
-cd MyAgents
-./setup.sh
+| 供应商 | 模型 |
+|--------|------|
+| Anthropic | Claude Opus 4.7, Sonnet 4.6, Haiku 4.5 |
+| DeepSeek | DeepSeek Chat, Reasoner |
+| Moonshot | Kimi K2.5, K2 Thinking |
+| 智谱 AI | GLM 5, 4.7 |
+| MiniMax | M2.5 |
+| 火山方舟 | Doubao Seed 2.0 系列 |
+| 硅基流动 | DeepSeek V3.2, GLM 4.7 等 |
+| ZenMux | Claude 4.6, Gemini 3.1 等 |
+| OpenRouter | GPT-5.2, Gemini 3 等 |
+
+## 执行案件工作流
+
+```
+客户材料 → [file-sorter] → 规范化目录
+              ↓
+       [case-analysis] → 案件分析底稿
+              ↓
+  ┌──────────┼──────────┐
+  ↓          ↓          ↓
+[企业调查]  [查档指引]  [流水分析]
+  ↓          ↓          ↓
+  └──────────┼──────────┘
+              ↓
+       [case-evaluation] → 决策：接不接/怎么收
+              ↓
+        申请书生成 + 进度跟踪
 ```
 
-#### 构建
+## 面向执行律师的功能
 
-```bash
-# Debug 构建 (含 DevTools)
-./build_dev.sh
+- **执行 Agent** — 内置执行法律知识，懂查封冻结期限、被执行人财产调查清单、拒执罪构成要件
+- **Chat + IM Bot 双通道** — 桌面端 + Telegram/钉钉/飞书，随时随地推进案件
+- **定时提醒** — 冻结到期、查封到期、续冻续封提醒，不错过期限
+- **工作区文件管理** — 每个案件独立目录，材料、分析、文书全在一个地方
+- **全文搜索** — 本地搜索所有案件材料和历史分析，数据不出电脑
+- **权限可控** — 行动/规划/自主三种模式，重要操作需确认
 
-# 生产构建 (macOS DMG)
-./build_macos.sh
-
-# 生产构建 (Windows NSIS)
-# PowerShell: .\build_windows.ps1
-```
+## 开发者
 
 ### 技术栈
 
 | 层级 | 技术 |
 |------|------|
-| 桌面框架 | Tauri v2 (Rust) + 多 Webview |
-| 前端 | React 19 + TypeScript + TailwindCSS + xterm.js |
-| Agent Runtime | Node.js v24 + Claude Agent SDK（默认）/ Claude Code CLI / OpenAI Codex CLI / Gemini CLI |
-| 社区生态 | Node.js（MCP Server / npm 包 / `myagents` CLI，统一 runtime，应用内置） |
-| 通信 | Rust HTTP/SSE Proxy（reqwest，统一 localhost no-proxy） |
-| 终端 | portable-pty（PTY 进程）+ xterm.js（前端渲染） |
-| 搜索 | Tantivy + tantivy-jieba（中文分词） |
-| 插件 | OpenClaw Plugin Bridge（独立 Node.js 进程加载社区 Channel 插件） |
+| 桌面框架 | Tauri v2 (Rust) |
+| 前端 | React 19 + TypeScript + TailwindCSS |
+| Agent Runtime | Node.js v24 + Claude Agent SDK |
+| 构建 | GitHub Actions 云编译（本地不需 Rust） |
 
-### 架构
+### 开发
 
-**Session-Centric 多实例 Sidecar 架构** — 每个会话拥有独立的 Agent 进程，严格 1:1 隔离；多 Owner 共享机制让 Tab、定时任务、Agent Channel 安全复用同一 Sidecar；Rust 代理层统一接管所有流量，零 CORS 问题；**单一 runtime** 内置 Node.js v24（跑 Sidecar / Plugin Bridge / MCP / 社区 npm 生态 / `myagents` CLI），Windows 还附带静默安装 Git for Windows，用户无需安装任何依赖。
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                          Tauri Desktop App                         │
-├────────────────────────────────────────────────────────────────────┤
-│  React Frontend                                                    │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐ │
-│  │  Chat 1  │  │  Chat 2  │  │ Settings │  │   Agent Channels    │ │
-│  │  Tab SSE │  │  Tab SSE │  │ 全局 API │  │  TG / 钉钉 / 插件   │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────────┬──────────┘ │
-│       │             │             │                   │            │
-├───────┼─────────────┼─────────────┼───────────────────┼────────────┤
-│  Rust │             │             │                   │            │
-│  ┌────┴─────────────┴─────┐  ┌────┴─────┐  ┌──────────┴──────────┐ │
-│  │     SidecarManager     │  │  Global  │  │    ManagedAgents    │ │
-│  │  Session:Sidecar 1:1   │  │ Sidecar  │  │    Plugin Bridge    │ │
-│  │  Owner Tab/Cron/Agent  │  │          │  │     (OpenClaw)      │ │
-│  └────┬─────────────┬─────┘  └──────────┘  └──────────┬──────────┘ │
-│       ▼             ▼                                 ▼            │
-│  Node.js Sidecar  (Claude Agent SDK / CC / Codex / Gemini CLI)     │
-│    + MCP Server / 社区 npm 生态 / myagents CLI（统一 runtime）     │
-└────────────────────────────────────────────────────────────────────┘
+```bash
+git clone git@github.com:394112866-spec/EnforcementAgents.git
+cd EnforcementAgents
+npm install
+npm run dev:web     # 前端开发
+npm run server      # 后端开发
 ```
 
-> 完整架构说明、Session 切换机制、Owner 生命周期等详见 [技术架构文档](specs/ARCHITECTURE.md)。
+推送 tag 触发 CI 构建安装包：
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
 
-### 贡献
+### 致谢
 
-请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解贡献指南。
+基于 [MyAgents](https://github.com/hAcKklyc/MyAgents) 构建，感谢 MyAgents 团队的优秀工作。
 
-### 许可证
+## 许可证
 
 [Apache License 2.0](LICENSE)
 
