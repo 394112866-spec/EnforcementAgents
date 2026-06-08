@@ -46,6 +46,9 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Install NSIS (Windows installer)
+        run: choco install nsis -y --no-progress
+
       - name: Build Tauri (Windows NSIS)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -115,10 +118,16 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Build Tauri (macOS)
+      - name: Build Tauri (macOS, unsigned)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ''
+          APPLE_CERTIFICATE_PASSWORD: ''
+          APPLE_SIGNING_IDENTITY: ''
+          APPLE_ID: ''
+          APPLE_PASSWORD: ''
+          APPLE_TEAM_ID: ''
         with:
           tagName: v__VERSION__
           releaseName: 'EnforcementAgents v__VERSION__'
