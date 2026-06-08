@@ -11,9 +11,6 @@ on:
         required: true
         type: string
 
-env:
-  APP_NAME: EnforcementAgents
-
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -30,12 +27,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build server bundle
-        run: npm run build:server
-
-      - name: Build frontend
-        run: npm run build:web
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,98 +37,37 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Install NSIS (Windows installer)
+      - name: Install NSIS
         run: choco install nsis -y --no-progress
 
-      - name: Build Tauri (Windows NSIS)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Tauri app
+        run: npx tauri build --bundles nsis
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
         with:
-          tagName: v__VERSION__
-          releaseName: 'EnforcementAgents v__VERSION__'
-          releaseBody: |
+          name: windows-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: '执行工作台 v__VERSION__'
+          body: |
             ## 执行工作台 v__VERSION__
 
             执行律师专属 AI 桌面工作台。
 
             ### 内置能力
             - 6 个执行专用 Skills（材料整理/案件分析/财产调查/查档指引/流水分析/案件评估）
-            - 预配企查查 MCP、小红书 MCP
             - 执行律师专属 Agent
-            - 案件工作区模板
+            - 预配企查查 MCP、小红书 MCP
 
             ### 安装说明
             - Windows: 下载 .exe 安装包，双击安装
             - 安装后打开"执行工作台"即可使用
-          releaseDraft: false
+          draft: false
           prerelease: false
-
-      - name: Upload NSIS installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer
-          path: src-tauri/target/release/bundle/nsis/*.exe
-
-  build-macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-          - platform: macos-15-large
-            target: x86_64-apple-darwin
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build server bundle
-        run: npm run build:server
-
-      - name: Build frontend
-        run: npm run build:web
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - name: Build Tauri (macOS, unsigned)
-        uses: tauri-apps/tauri-action@v0
+          files: src-tauri/target/release/bundle/nsis/*.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ''
-          APPLE_CERTIFICATE_PASSWORD: ''
-          APPLE_SIGNING_IDENTITY: ''
-          APPLE_ID: ''
-          APPLE_PASSWORD: ''
-          APPLE_TEAM_ID: ''
-        with:
-          tagName: v__VERSION__
-          releaseName: 'EnforcementAgents v__VERSION__'
-          releaseDraft: false
-          prerelease: false
-          args: --target ${{ matrix.target }}
-
-      - name: Upload DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-${{ matrix.target }}
-          path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
