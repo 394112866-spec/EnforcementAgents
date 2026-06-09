@@ -286,7 +286,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Initialize from window.innerWidth to avoid layout flash (FOUC) on first render
   const [isNarrowLayout, setIsNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
   // In narrow mode, default workspace to hidden (overlay) — otherwise it blocks chat on startup
-  const [showWorkspace, setShowWorkspace] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
+  const [showWorkspace, setShowWorkspace] = useState(true);
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
   // Introduction overlay: INTRODUCTION.md content for empty session welcome
   const [introductionContent, setIntroductionContent] = useState<string | null>(null);
