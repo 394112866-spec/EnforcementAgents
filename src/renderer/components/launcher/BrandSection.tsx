@@ -14,7 +14,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import CronTaskSettingsModal, { type CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
 import LauncherInputContextRow from './LauncherInputContextRow';
-import EnforcementDashboard from './EnforcementDashboard';
 import type { RuntimeDetections } from '../../../shared/types/runtime';
 import ModeSegment, { type InputMode } from '@/components/task-center/ModeSegment';
 import RecentThoughtsRow from '@/components/task-center/RecentThoughtsRow';
@@ -398,9 +397,14 @@ export default memo(function BrandSection({
 
     return (
         <section ref={sectionRef} className="flex flex-1 flex-col items-center px-12">
-            {/* Dashboard area — enforcement workbench overview */}
+            {/* Center — just the brand + input */}
             <div className="flex flex-1 flex-col items-center justify-center">
-                <EnforcementDashboard />
+                <h1 className="text-[2rem] font-semibold tracking-tight text-[var(--ink)]">
+                    执行工作台
+                </h1>
+                <p className="mt-1 text-[14px] text-[var(--ink-muted)]">
+                    执行律师的 AI 搭档
+                </p>
             </div>
 
             {/* Mode declaration: 任务 / 想法 (see DESIGN.md §6.8, PRD §4.1).
