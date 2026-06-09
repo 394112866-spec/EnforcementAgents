@@ -11,9 +11,7 @@ interface DashboardProps {
 }
 
 const STATS = [
-  { label: '在办案件', value: '12', icon: Scale, color: 'text-blue-600', bg: 'bg-blue-50' },
   { label: '冻结到期', value: '3', icon: Clock, color: 'text-red-500', bg: 'bg-red-50' },
-  { label: '本月回款', value: '85万', icon: Banknote, color: 'text-emerald-600', bg: 'bg-emerald-50' },
   { label: '待办事项', value: '7', icon: AlertTriangle, color: 'text-amber-600', bg: 'bg-amber-50' },
 ];
 
@@ -52,7 +50,7 @@ export default memo(function EnforcementDashboard({ onOpenCase }: DashboardProps
       </div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 gap-3">
         {STATS.map((stat) => (
           <div
             key={stat.label}
