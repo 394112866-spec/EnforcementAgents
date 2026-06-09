@@ -1,4 +1,5 @@
 import { AlertTriangle, ArrowLeft, Globe, History, Loader2, Plus, PanelRightOpen, RotateCcw, TerminalSquare, X } from 'lucide-react';
+import CalendarWidget from '@/components/launcher/CalendarWidget';
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -3191,11 +3192,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             ref={directoryPanelContainerRef}
             className={shouldUseWorkspaceOverlay
               ? 'absolute bottom-0 right-0 top-0 z-50 flex w-[340px] max-w-[85%] flex-col border-l border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg'
-              : 'flex w-1/4 flex-col'
+              : 'flex w-1/4 flex-col gap-3 overflow-y-auto p-3'
             }
             style={shouldUseWorkspaceOverlay ? undefined : { minWidth: 'var(--sidebar-min-width)' }}
           >
-            <DirectoryPanel
+            {/* Calendar — top half of right panel */}
+            <CalendarWidget deadlines={[
+              { date: '2026-06-15', event: '冻结银行存款到期', caseName: '张三案', urgent: true },
+              { date: '2026-06-20', event: '查封不动产到期', caseName: '王五案', urgent: true },
+              { date: '2026-07-01', event: '恢复执行审查', caseName: 'A公司案', urgent: false },
+              { date: '2026-07-10', event: '冻结股权到期', caseName: '张三案', urgent: true },
+              { date: '2026-06-25', event: '拍卖公告截止', caseName: '王五案', urgent: false },
+            ]} />
+
+            {/* Workspace files — bottom half */}
+            <div className="flex-1 overflow-hidden rounded-xl border border-[var(--line)]">
+              <DirectoryPanel
               ref={directoryPanelRef}
               agentDir={agentDir}
               projectIcon={currentProject?.icon}
@@ -3223,6 +3235,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               terminalAlive={terminalAlive}
               onOpenBrowser={isSplitViewEnabled && !isNarrowLayout ? handleOpenBrowser : undefined}
             />
+            </div>
           </div>
         </>
       )}
