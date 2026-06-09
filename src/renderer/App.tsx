@@ -7,6 +7,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
+import Sidebar from '@/components/Sidebar';
 import TabProvider from '@/context/TabProvider';
 import { useToast } from '@/components/Toast';
 import { useUpdater } from '@/hooks/useUpdater';
@@ -2413,9 +2414,13 @@ export default function App() {
         />
       </CustomTitleBar>
 
-      {/* Tab content - only Chat views need TabProvider for sidecar communication */}
-      <div ref={contentRef} className="relative flex-1 overflow-hidden">
-        {tabs.map((tab) => (
+      {/* Main area: Sidebar + Tab content */}
+      <div className="relative flex flex-1 overflow-hidden">
+        <Sidebar />
+
+        {/* Tab content - only Chat views need TabProvider for sidecar communication */}
+        <div ref={contentRef} className="relative flex-1 overflow-hidden">
+          {tabs.map((tab) => (
           <MemoizedTabContent
             key={tab.id}
             tab={tab}
@@ -2449,6 +2454,7 @@ export default function App() {
             taskCenterPendingIntent={taskCenterPendingIntent}
           />
         ))}
+        </div>
       </div>
 
       {/* Exit confirmation dialog for running cron tasks */}

@@ -9,7 +9,7 @@
  * we use decorations: false on Windows for custom title bar styling.
  */
 
-import { Bot, Minus, Square, X, RefreshCw, Settings, Copy, CheckSquare } from 'lucide-react';
+import { Bot, Bell, Minus, Square, X, RefreshCw, Settings, Copy, CheckSquare } from 'lucide-react';
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { isTauri } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
@@ -215,6 +215,16 @@ export default function CustomTitleBar({
                     bg fade smooth while letting the scale change snap
                     instantly in both directions, so the press feedback
                     lands as "down & back" without the return bounce. */}
+                {/* 待办 — includes 到期预警 + 监控变动 */}
+                <button
+                    onClick={() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER))}
+                    className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                    title="待办事项"
+                >
+                    <Bell className="h-4 w-4" />
+                    <span className="text-[13px] font-medium">待办</span>
+                </button>
+
                 <div ref={feedbackBtnRef} className="relative">
                     <button
                         onClick={() => setShowFeedback(prev => !prev)}
